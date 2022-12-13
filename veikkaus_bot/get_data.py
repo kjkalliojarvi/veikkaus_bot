@@ -7,7 +7,7 @@ from .classes import Card, Race, Runner, Pool
 
 
 Ids = namedtuple('Ids', 'card_id race_id')
-RaceCards = namedtuple('RaceCards', 'trackname country card_id')
+RaceCards = namedtuple('RaceCards', 'trackname abbreviation country card_id')
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
 
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
@@ -22,15 +22,20 @@ def get_racecards() -> list:
     cards = get_cards()
     racecards = []
     for card in cards:
-        racecards.append(RaceCards(trackname=card['trackName'], country=card['country'], card_id=card['cardId']))
+        racecards.append(RaceCards(trackname=card['trackName'], abbreviation=card['trackAbbreviation'],
+                                   country=card['country'], card_id=card['cardId']))
     return racecards
 
 
-def get_card(trackname: str) -> Card:
+def get_card(trackname: str='', abbreviation:str='') -> Card:
     cards = get_cards()
     for card in cards:
-        if card['trackName'] == trackname:
-            return Card(**card)
+        if trackname:
+            if card['trackName'] == trackname:
+                return Card(**card)
+        elif abbreviation:
+            if card['trackAbbreviation'] == abbreviation:
+                return Card(**card)
 
 
 def get_card_id(trackname: str) -> int:
