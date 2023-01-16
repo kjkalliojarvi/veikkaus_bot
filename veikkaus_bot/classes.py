@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from enum import Enum
 from typing import List, Dict, Optional
 from pydantic import BaseModel
 
@@ -42,7 +43,7 @@ class Race(BaseModel):
     monte: bool
     firstPrize: int
     startTime: int
-    toteResultString: str
+    toteResultString: Optional[str]
     reserveHorsesOrder: str
     raceRider: str
     trackProfile: str
@@ -59,22 +60,28 @@ class Pool(BaseModel):
     races: list[dict]
     netSales: int
     netPool: int
+    betTypes: Optional[list]
     allowsCalculator: bool
     allowsBetfile: bool
     allowsFractions: bool
+    rules: dict
     operatorMaintenance: bool
 
 
 class Stat(BaseModel):
     year: str
-    record1: str
-    record2: str
+    record1: Optional[str]
+    record2: Optional[str]
     starts: int
     position1: int
     position2: int
     position3: int
     places: int
     winMoney: int
+    gallopPercent: Optional[int]
+    disqualificationPercent: Optional[int]
+    placementPercent: Optional[int]
+    winningPercent: Optional[int]
 
 
 class Stats(BaseModel):
@@ -87,9 +94,9 @@ class PrevStart(BaseModel):
     priorStartId: int
     distance: int
     driver: str
-    meetDate: datetime
+    meetDate: str
     raceNumber: int
-    shortMeetDate: date
+    shortMeetDate: str
     firstPrize: int
     startTrack: int
     result: str
@@ -104,7 +111,7 @@ class PrevStart(BaseModel):
     raceSurface: str
     shoesType: str
     headGear: str
-    videoLink: str
+    videoLink: Optional[str]
     resultsAvailable: bool
     specialCart: str
 
@@ -129,8 +136,8 @@ class Runner(BaseModel):
     birthDate: date
     gender: str
     color: dict
-    mobileStartRecord: str
-    handicapRaceRecord: str
+    mobileStartRecord: Optional[str]
+    handicapRaceRecord: Optional[str]
     driverName: str
     driverNameInitials: str
     driverLicenseClass: str
@@ -143,8 +150,18 @@ class Runner(BaseModel):
     ownerName: str
     ownerHomeTown: str
     specialCart: str
-    condition: int
-    expectedValue: int
+    condition: Optional[int]
+    expectedValue: Optional[int]
     stats: dict
     prevStarts: list
 
+
+class PoolTypes(Enum):
+    VOITTAJA = 'VOI'
+    SIJA = 'SIJA'
+    KAKSARI = 'KAK'
+    TROIKKA = 'TRO'
+    DUO = 'DUO'
+    T4 = 'T4'
+    T5 = 'T5'
+    T65 = 'T65'
