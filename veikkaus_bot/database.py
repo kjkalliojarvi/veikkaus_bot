@@ -9,6 +9,11 @@ START = """
     CREATE TABLE start(horseid, startid, distance, driver, meetdate, racenumber, firstprize, starttrack,
                 trackcode, winodds, kmtime, frontshoes, rearshoes, specialcart, coachname)
 """
+
+
+def get_cursor():
+    con =
+
 def createdb():
     con = sqlite3.connect("heppa.db")
     cur = con.cursor()
