@@ -2,13 +2,65 @@ import sqlite3
 from contextlib import contextmanager
 
 
-HORSE = """
-    CREATE TABLE IF NOT EXISTS horse(horseid, name, sire, dam, damsire, birthdate, gender, coachname)
+RUNNER_TABLE = """
+    CREATE TABLE IF NOT EXISTS runner(
+        runnerid INTEGER,
+        name TEXT,
+        sire TEXT,
+        dam TEXT,
+        damsire TEXT,
+        birthdate TEXT,
+        gender TEXT,
+        coachName TEXT,
+        coachNameInitials TEXT,
+        onwerName TEXT,
+        ownerHomeTown TEXT,
+        PRIMARY KEY (runnerid) ON CONFLICT IGNORE);
 """
 
-START = """
-    CREATE TABLE start(horseid, startid, distance, driver, meetdate, racenumber, firstprize, starttrack,
-                trackcode, winodds, kmtime, frontshoes, rearshoes, specialcart, coachname)
+START_TABLE = """
+    CREATE TABLE IF NOT EXISTS start(
+        runnerid INTEGER,
+        raceid INTEGER,
+        distance INTEGER,
+        driver TEXT,
+        meetdate TEXT,
+        racenumber INTEGER,
+        firstprize INTEGER,
+        starttrack INTEGER,
+        trackcode TEXT,
+        winodds INTEGER,
+        kmtime TEXT,
+        frontshoes TEXT,
+        rearshoes TEXT,
+        specialcart TEXT,
+        coachname TEXT,
+        PRIMARY KEY (runnerid, raceid) ON CONFLICT IGNORE);
+"""
+
+RACE_TABLE = """
+    CREATE TABLE IF NOT EXISTS race(
+        raceid INTEGER,
+        number INTEGER,
+        distance INTEGER,
+        breed TEXT,
+        seriesSpecification TEXT,
+        startType TEXT,
+        monte BOOLEAN,
+        firstPrize INTEGER,
+        startTime INTEGER,
+        toteResultString TEXT,
+        trackProfile TEXT,
+        trackSurface TEXT,
+        country TEXT,
+        currentRaceNumber INTEGER,
+        meetDate TEXT,
+        priority INTEGER
+        raceType TEXT,
+        trackAbbreviation TEXT,
+        trackName TEXT,
+        trackNumber INTEGER,
+        PRIMARY KEY (raceid) ON CONFLICT IGNORE);
 """
 
 @contextmanager
@@ -21,11 +73,12 @@ def db_ops(db_name='testi.db'):
 
 
 def createdb():
-    con = sqlite3.connect("heppa.db")
-    cur = con.cursor()
-    cur.execute(HORSE)
-    cur.execute(START)
+    with db_ops() as cur:
+        cur.execute(RUNNER_TABLE)
+        cur.execute(START_TABLE)
+        cur.execute(RACE_TABLE)
 
+"""
 with db_ops('db_path') as cur:
     cur.execute('create table if not exists temp (id int, name text)')
 
@@ -35,3 +88,4 @@ with db_ops('db_path') as cur:
 
 with db_ops('db_path') as cur:
     print(list(cur.execute('select * from temp')))
+"""
