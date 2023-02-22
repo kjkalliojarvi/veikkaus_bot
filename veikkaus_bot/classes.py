@@ -135,7 +135,7 @@ class Runner(BaseModel):
     horseAge: int
     birthDate: date
     gender: str
-    color: dict
+    color: Optional[dict]
     mobileStartRecord: Optional[str]
     handicapRaceRecord: Optional[str]
     driverName: str
