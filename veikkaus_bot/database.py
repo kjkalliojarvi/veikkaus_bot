@@ -4,8 +4,8 @@ from contextlib import contextmanager
 
 RUNNER_TABLE = """
     CREATE TABLE IF NOT EXISTS runner(
-        runnerid INTEGER,
-        name TEXT,
+        runnerId INTEGER,
+        horseName TEXT,
         sire TEXT,
         dam TEXT,
         damsire TEXT,
@@ -20,27 +20,35 @@ RUNNER_TABLE = """
 
 START_TABLE = """
     CREATE TABLE IF NOT EXISTS start(
-        runnerid INTEGER,
-        raceid INTEGER,
+        runnerId INTEGER,
+        priorStartId INTEGER,
         distance INTEGER,
         driver TEXT,
-        meetdate TEXT,
-        racenumber INTEGER,
-        firstprize INTEGER,
-        starttrack INTEGER,
-        trackcode TEXT,
-        winodds INTEGER,
-        kmtime TEXT,
-        frontshoes TEXT,
-        rearshoes TEXT,
-        specialcart TEXT,
+        meetDate TEXT,
+        raceNumber INTEGER,
+        shortMeetDate TEXT,
+        firstPrize INTEGER,
+        startTrack INTEGER,
+        result TEXT,
+        trackCode TEXT,
+        winOdds INTEGER,
+        kmTime TEXT,
+        frontShoes TEXT,
+        rearShoes TEXT,
+        raceStartType TEXT,
+        trackProfileType TEXT,
+        raceSurface TEXT,
+        shoesType TEXT,
+        headGear TEXT,
+        specialCart TEXT,
         coachname TEXT,
         PRIMARY KEY (runnerid, raceid) ON CONFLICT IGNORE);
 """
 
 RACE_TABLE = """
     CREATE TABLE IF NOT EXISTS race(
-        raceid INTEGER,
+        raceId INTEGER,
+        cardId INTEGER,
         number INTEGER,
         distance INTEGER,
         breed TEXT,
@@ -53,10 +61,6 @@ RACE_TABLE = """
         trackProfile TEXT,
         trackSurface TEXT,
         country TEXT,
-        currentRaceNumber INTEGER,
-        meetDate TEXT,
-        priority INTEGER
-        raceType TEXT,
         trackAbbreviation TEXT,
         trackName TEXT,
         trackNumber INTEGER,

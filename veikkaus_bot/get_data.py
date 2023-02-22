@@ -1,5 +1,6 @@
 
 from collections import namedtuple
+from functools import lru_cache
 import requests
 import json
 
@@ -14,17 +15,21 @@ headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ES
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
 
 
+@lru_cache
 def _get_collection(url: str) -> dict:
     resp = requests.get(f'{URL}{url}', headers=headers)
     return json.loads(resp.text)['collection']
 
 
+@lru_cache
 def _get_dict(url: str) -> dict:
     resp = requests.get(f'{URL}{url}', headers=headers)
     return json.loads(resp.text)
 
+
 def get_cards() -> list:
     return _get_collection('/cards/today')
+
 
 def get_racecards() -> list:
     cards = get_cards()
@@ -35,6 +40,7 @@ def get_racecards() -> list:
     return racecards
 
 
+@lru_cache
 def get_card(abbreviation: str) -> Card:
     cards = get_cards()
     for card in cards:
@@ -44,15 +50,20 @@ def get_card(abbreviation: str) -> Card:
 
 def get_races(abbreviation: str) -> list:
     card = get_card(abbreviation)
+    races = []
     if card:
-        return _get_collection(f'/card/{card.cardId}/races')
+        all_races = _get_collection(f'/card/{card.cardId}/races')
+        for race in all_races:
+            races.append(Race(**race))
+    return races
+
 
 
 def get_race(abbreviation: str, racenumber: int) -> Race:
     races = get_races(abbreviation)
     for race in races:
-        if race['number'] == racenumber:
-            return Race(**race)
+        if race.number == racenumber:
+            return race
 
 
 def get_card_pools(abbreviation: str) -> list:
@@ -81,8 +92,12 @@ def get_odds(abbreviation: str, racenumber: int, pooltype: PoolTypes) -> dict:
 
 def get_runners(abbreviation: str, racenumber: int) -> list:
     race = get_race(abbreviation, racenumber)
+    runners = []
     if race:
-        return _get_collection(f'/race/{race.raceId}/runners')
+        all_runners = _get_collection(f'/race/{race.raceId}/runners')
+        for runner in all_runners:
+            runners.append(Runner(**runner))
+    return runners
 
 
 def get_runner(abbreviation: str, racenumber: int, startnumber: int) -> Runner:
