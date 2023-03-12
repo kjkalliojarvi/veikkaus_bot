@@ -15,7 +15,7 @@ RUNNER_TABLE = """
         coachNameInitials TEXT,
         onwerName TEXT,
         ownerHomeTown TEXT,
-        PRIMARY KEY (runnerid) ON CONFLICT IGNORE);
+        PRIMARY KEY (runnerId) ON CONFLICT REPLACE);
 """
 
 START_TABLE = """
@@ -31,7 +31,7 @@ START_TABLE = """
         startTrack INTEGER,
         result TEXT,
         trackCode TEXT,
-        winOdds INTEGER,
+        winOdd INTEGER,
         kmTime TEXT,
         frontShoes TEXT,
         rearShoes TEXT,
@@ -41,8 +41,9 @@ START_TABLE = """
         shoesType TEXT,
         headGear TEXT,
         specialCart TEXT,
-        coachname TEXT,
-        PRIMARY KEY (runnerid, raceid) ON CONFLICT IGNORE);
+        coachName TEXT,
+        startInterval INTEGER,
+        PRIMARY KEY (runnerId, priorStartId) ON CONFLICT REPLACE);
 """
 
 RACE_TABLE = """
@@ -64,7 +65,7 @@ RACE_TABLE = """
         trackAbbreviation TEXT,
         trackName TEXT,
         trackNumber INTEGER,
-        PRIMARY KEY (raceid) ON CONFLICT IGNORE);
+        PRIMARY KEY (raceId) ON CONFLICT REPLACE);
 """
 
 @contextmanager
@@ -81,6 +82,22 @@ def createdb():
         cur.execute(RUNNER_TABLE)
         cur.execute(START_TABLE)
         cur.execute(RACE_TABLE)
+
+
+def store_races(races):
+    with db_ops() as cur:
+        cur.executemany('INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', races)
+
+
+def store_runners(runners):
+    with db_ops() as cur:
+        cur.executemany('INSERT INTO runner VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', runners)
+
+
+def store_starts(starts):
+    with db_ops() as cur:
+        cur.executemany('INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', starts)
+
 
 """
 with db_ops('db_path') as cur:
