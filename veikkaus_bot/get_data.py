@@ -6,6 +6,8 @@ from typing import List, Dict, Optional
 from pydantic import BaseModel
 import requests
 import json
+from .database import Db
+
 
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
@@ -23,7 +25,7 @@ class Card(BaseModel):
     lastRaceOfficial: Optional[int]
     lunchRaces: bool
     meetDate: date
-    minutesToPost: int
+    minutesToPost: Optional[int]
     priority: int
     raceType: str
     trackAbbreviation: str
@@ -156,10 +158,10 @@ class PrevStart(BaseModel):
     shortMeetDate: str
     firstPrize: Optional[int]
     startTrack: int
-    result: str
+    result: Optional[str]
     trackCode: str
-    winOdd: str
-    kmTime: str
+    winOdd: Optional[str]
+    kmTime: Optional[str]
     frontShoes: str
     rearShoes: str
     raceRiderType: Optional[str]
@@ -271,6 +273,62 @@ class PoolTypes(Enum):
     T65 = 'T65'
 
 
+class VeikkausData:
+    def __init__(self, country=None):
+        self.country: str = country
+        self.cards: list[Card] = []
+        self.races: list[Race] = []
+        self.runners: list[Runner] = []
+        self.starts = None
+
+    def load_data(self):
+        all_cards = []
+        all_races = []
+        all_runners = []
+        cards = get_cards(self.country)
+        for card in cards:
+            all_cards.append(card)
+            races = card.get_races()
+            for race in races:
+                all_races.append(race)
+                runners = race.get_runners()
+                for runner in runners:
+                    all_runners.append(runner)
+        self.cards = all_cards
+        self.races = all_races
+        self.runners = all_runners
+        print(f'{len(self.cards)} ravit, {len(self.races)} lähtöä, {len(self.runners)} hevosta.')
+
+    def save_records(self):
+        race_records = []
+        runner_records = []
+        start_records = []
+        for race in self.races:
+            for card in self.cards:
+                if card.cardId == race.cardId:
+                    race_records.append(race.race_record(card))
+        for runner in self.runners:
+            runner_records.append(runner.runner_record())
+            start_records += runner.prevstarts_record()
+        data = {
+            'races': race_records,
+            'runners': runner_records,
+            'starts': start_records
+        }
+        timestamp = datetime.now()
+        filename = f'{timestamp.year}-{timestamp.month}-{timestamp.day}-{self.country}.json'
+        with open(filename, 'w') as outfile:
+            json.dump(data, outfile)
+
+    def store_records(self, jsonfile: str):
+        with open(jsonfile, 'r') as openfile:
+            json_object = json.load(openfile)
+        db = Db('testi-FI.db')
+        db.store_races(json_object['races'])
+        db.store_runners(json_object['runners'])
+        db.store_starts(json_object['starts'])
+
+
 def _get_collection(url: str) -> dict:
     resp = requests.get(f'{URL}{url}', headers=headers)
     return json.loads(resp.text)['collection']
@@ -282,11 +340,12 @@ def _get_dict(url: str) -> dict:
 
 
 @lru_cache
-def get_cards() -> list[Card]:
+def get_cards(country=None) -> list[Card]:
     cards = _get_collection('/cards/today')
     all_cards = []
     for card in cards:
-        all_cards.append(Card(**card))
+        if (not country or card['country'] == country):
+            all_cards.append(Card(**card))
     return all_cards
 
 

@@ -2,7 +2,7 @@ import sqlite3
 from contextlib import contextmanager
 
 
-RUNNER_TABLE = """
+CREATE_RUNNER_TABLE = """
     CREATE TABLE IF NOT EXISTS runner(
         runnerId INTEGER,
         horseName TEXT,
@@ -18,7 +18,9 @@ RUNNER_TABLE = """
         PRIMARY KEY (runnerId) ON CONFLICT REPLACE);
 """
 
-START_TABLE = """
+INSERT_RUNNER = 'INSERT INTO runner VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+
+CREATE_START_TABLE = """
     CREATE TABLE IF NOT EXISTS start(
         runnerId INTEGER,
         priorStartId INTEGER,
@@ -45,8 +47,9 @@ START_TABLE = """
         startInterval INTEGER,
         PRIMARY KEY (runnerId, priorStartId) ON CONFLICT REPLACE);
 """
+INSERT_START = 'INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
-RACE_TABLE = """
+CREATE_RACE_TABLE = """
     CREATE TABLE IF NOT EXISTS race(
         raceId INTEGER,
         cardId INTEGER,
@@ -67,36 +70,40 @@ RACE_TABLE = """
         trackNumber INTEGER,
         PRIMARY KEY (raceId) ON CONFLICT REPLACE);
 """
+INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+
 
 @contextmanager
-def db_ops(db_name='testi.db'):
+def db_ops(db_name):
     conn = sqlite3.connect(db_name)
     cur = conn.cursor()
     yield cur
     conn.commit()
     conn.close()
 
+class Db:
+    def __init__(self, db_name):
+        self.db_name = db_name
 
-def createdb():
-    with db_ops() as cur:
-        cur.execute(RUNNER_TABLE)
-        cur.execute(START_TABLE)
-        cur.execute(RACE_TABLE)
+    def create(self):
+        with db_ops(self.db_name) as cur:
+            cur.execute(CREATE_RUNNER_TABLE)
+            cur.execute(CREATE_START_TABLE)
+            cur.execute(CREATE_RACE_TABLE)
 
-
-def store_races(races):
-    with db_ops() as cur:
-        cur.executemany('INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', races)
-
-
-def store_runners(runners):
-    with db_ops() as cur:
-        cur.executemany('INSERT INTO runner VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', runners)
+    def store_races(self, races):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_RACE, races)
 
 
-def store_starts(starts):
-    with db_ops() as cur:
-        cur.executemany('INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', starts)
+    def store_runners(self, runners):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_RUNNER, runners)
+
+
+    def store_starts(self, starts):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_START, starts)
 
 
 """
