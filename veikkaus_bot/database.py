@@ -105,6 +105,12 @@ class Db:
         with db_ops(self.db_name) as cur:
             cur.executemany(INSERT_START, starts)
 
+    def query_runner(self, name):
+        with db_ops(self.db_name) as cur:
+            res = list(cur.execute("SELECT runnerId FROM runner WHERE horseName='%s'" %  name))
+            res2 = list(cur.execute("SELECT * FROM start WHERE runnerId='%d'" % res[0]))
+        return res2
+
 
 """
 with db_ops('db_path') as cur:

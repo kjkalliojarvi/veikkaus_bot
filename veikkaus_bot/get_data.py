@@ -2,16 +2,16 @@ from collections import namedtuple
 from datetime import date, datetime
 from enum import Enum
 from functools import lru_cache
-from typing import List, Dict, Optional
+from typing import Optional
 from pydantic import BaseModel
 import requests
 import json
 from .database import Db
 
-
++
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
-
+Db_name = 'veikka.db'
 
 class Card(BaseModel):
     cancelled: bool
@@ -105,6 +105,7 @@ class Race(BaseModel):
             pools.append(Pool(**pool))
         return pools
 
+
 class Pool(BaseModel):
     poolId: int
     cardId: int
@@ -152,7 +153,7 @@ class Stats(BaseModel):
 class PrevStart(BaseModel):
     priorStartId: int
     distance: int
-    driver: str
+    driver: Optional[str]
     meetDate: str
     raceNumber: int
     shortMeetDate: str
@@ -276,12 +277,6 @@ class PoolTypes(Enum):
 class VeikkausData:
     def __init__(self, country=None):
         self.country: str = country
-        self.cards: list[Card] = []
-        self.races: list[Race] = []
-        self.runners: list[Runner] = []
-        self.starts = None
-
-    def load_data(self):
         all_cards = []
         all_races = []
         all_runners = []
@@ -294,12 +289,12 @@ class VeikkausData:
                 runners = race.get_runners()
                 for runner in runners:
                     all_runners.append(runner)
-        self.cards = all_cards
-        self.races = all_races
-        self.runners = all_runners
+        self.cards: list[Card] = all_cards
+        self.races: list[Race] = all_races
+        self.runners: list[Runner] = all_runners
         print(f'{len(self.cards)} ravit, {len(self.races)} lähtöä, {len(self.runners)} hevosta.')
 
-    def save_records(self):
+    def save_to_file(self):
         race_records = []
         runner_records = []
         start_records = []
@@ -320,10 +315,10 @@ class VeikkausData:
         with open(filename, 'w') as outfile:
             json.dump(data, outfile)
 
-    def store_records(self, jsonfile: str):
+    def store_to_db(self, jsonfile: str):
         with open(jsonfile, 'r') as openfile:
             json_object = json.load(openfile)
-        db = Db('testi-FI.db')
+        db = Db(Db_name)
         db.store_races(json_object['races'])
         db.store_runners(json_object['runners'])
         db.store_starts(json_object['starts'])
