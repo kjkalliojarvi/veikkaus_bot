@@ -8,7 +8,7 @@ import requests
 import json
 from .database import Db
 
-+
+
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
 Db_name = 'veikka.db'
@@ -22,17 +22,17 @@ class Card(BaseModel):
     currentRaceStartTime: int
     firstRaceStart: int
     future: bool
-    lastRaceOfficial: Optional[int]
+    lastRaceOfficial: Optional[int] = None
     lunchRaces: bool
     meetDate: date
-    minutesToPost: Optional[int]
+    minutesToPost: Optional[int] = None
     priority: int
     raceType: str
     trackAbbreviation: str
     trackName: str
     trackNumber: int
     mainPerformance: bool
-    totoPools: Optional[list]
+    totoPools: Optional[list] = None
     epgStartTime: int
     epgStopTime: int
     epgChannel: int
@@ -66,8 +66,8 @@ class Race(BaseModel):
     monte: bool
     firstPrize: int
     startTime: int
-    toteResultString: Optional[str]
-    reserveHorsesOrder: Optional[str]
+    toteResultString: Optional[str] = None
+    reserveHorsesOrder: Optional[str] = None
     raceRider: str
     trackProfile: str
     trackSurface: str
@@ -117,7 +117,7 @@ class Pool(BaseModel):
     races: list[dict]
     netSales: int
     netPool: int
-    betTypes: Optional[list]
+    betTypes: Optional[list] = None
     allowsCalculator: bool
     allowsBetfile: bool
     allowsFractions: bool
@@ -130,18 +130,18 @@ class Pool(BaseModel):
 
 class Stat(BaseModel):
     year: str
-    record1: Optional[str]
-    record2: Optional[str]
+    record1: Optional[str] = None
+    record2: Optional[str] = None
     starts: int
     position1: int
     position2: int
     position3: int
     places: int
     winMoney: int
-    gallopPercent: Optional[int]
-    disqualificationPercent: Optional[int]
-    placementPercent: Optional[int]
-    winningPercent: Optional[int]
+    gallopPercent: Optional[int] = None
+    disqualificationPercent: Optional[int] = None
+    placementPercent: Optional[int] = None
+    winningPercent: Optional[int] = None
 
 
 class Stats(BaseModel):
@@ -153,25 +153,25 @@ class Stats(BaseModel):
 class PrevStart(BaseModel):
     priorStartId: int
     distance: int
-    driver: Optional[str]
+    driver: Optional[str] = None
     meetDate: str
     raceNumber: int
     shortMeetDate: str
-    firstPrize: Optional[int]
+    firstPrize: Optional[int] = None
     startTrack: int
-    result: Optional[str]
+    result: Optional[str] = None
     trackCode: str
-    winOdd: Optional[str]
-    kmTime: Optional[str]
+    winOdd: Optional[str] = None
+    kmTime: Optional[str] = None
     frontShoes: str
     rearShoes: str
-    raceRiderType: Optional[str]
-    raceStartType: Optional[str]
-    trackProfileType: Optional[str]
-    raceSurface: Optional[str]
-    shoesType: Optional[str]
-    headGear: Optional[str]
-    videoLink: Optional[str]
+    raceRiderType: Optional[str] = None
+    raceStartType: Optional[str] = None
+    trackProfileType: Optional[str] = None
+    raceSurface: Optional[str] = None
+    shoesType: Optional[str] = None
+    headGear: Optional[str] = None
+    videoLink: Optional[str] = None
     resultsAvailable: bool
     specialCart: str
 
@@ -195,23 +195,23 @@ class Runner(BaseModel):
     horseAge: int
     birthDate: date
     gender: str
-    color: Optional[dict]
-    mobileStartRecord: Optional[str]
-    handicapRaceRecord: Optional[str]
-    driverName: Optional[str]
-    driverNameInitials: Optional[str]
-    driverLicenseClass: Optional[str]
-    driverOutfitColor: Optional[str]
-    driverRacingColors: Optional[str]
-    driverHelmetColors: Optional[str]
-    driverStats: Optional[str]
+    color: Optional[dict] = None
+    mobileStartRecord: Optional[str] = None
+    handicapRaceRecord: Optional[str] = None
+    driverName: Optional[str] = None
+    driverNameInitials: Optional[str] = None
+    driverLicenseClass: Optional[str] = None
+    driverOutfitColor: Optional[str] = None
+    driverRacingColors: Optional[str] = None
+    driverHelmetColors: Optional[str] = None
+    driverStats: Optional[str] = None
     coachName: str
     coachNameInitials: str
     ownerName: str
-    ownerHomeTown: Optional[str]
+    ownerHomeTown: Optional[str] = None
     specialCart: str
-    condition: Optional[int]
-    expectedValue: Optional[int]
+    condition: Optional[int] = None
+    expectedValue: Optional[int] = None
     stats: dict
     prevStarts: list[PrevStart]
 

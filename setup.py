@@ -12,8 +12,10 @@ with open('HISTORY.rst') as history_file:
     history = history_file.read()
 
 requirements = [
-    'pydantic'=='1.10.2',
-    'requests'=='2.28.1'
+    'pydantic'=='2.6.4',
+    'requests'=='2.31.0',
+    'sqlalchemy'=='2.0.29',
+    'python-decouple'=='3.8'
 ]
 
 setup_requirements = [ ]
@@ -30,6 +32,7 @@ setup(
         'Natural Language :: English',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12'
     ],
     description="Veikkaus bot",
     install_requires=requirements,
