@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+import json
 
 
 CREATE_RUNNER_TABLE = """
@@ -104,6 +105,13 @@ class Db:
     def store_starts(self, starts):
         with db_ops(self.db_name) as cur:
             cur.executemany(INSERT_START, starts)
+
+    def store_file_to_db(self, jsonfile: str):
+        with open(jsonfile, 'r') as openfile:
+            json_object = json.load(openfile)
+        self.store_races(json_object['races'])
+        self.store_runners(json_object['runners'])
+        self.store_starts(json_object['starts'])
 
     def query_runner(self, name):
         with db_ops(self.db_name) as cur:

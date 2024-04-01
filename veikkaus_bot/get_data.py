@@ -11,7 +11,7 @@ from .database import Db
 
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
-Db_name = 'veikka.db'
+
 
 class Card(BaseModel):
     cancelled: bool
@@ -314,14 +314,6 @@ class VeikkausData:
         filename = f'{timestamp.year}-{timestamp.month}-{timestamp.day}-{self.country}.json'
         with open(filename, 'w') as outfile:
             json.dump(data, outfile)
-
-    def store_to_db(self, jsonfile: str):
-        with open(jsonfile, 'r') as openfile:
-            json_object = json.load(openfile)
-        db = Db(Db_name)
-        db.store_races(json_object['races'])
-        db.store_runners(json_object['runners'])
-        db.store_starts(json_object['starts'])
 
 
 def _get_collection(url: str) -> dict:
