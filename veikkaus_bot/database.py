@@ -68,7 +68,7 @@ CREATE_RACE_TABLE = """
         trackAbbreviation TEXT,
         trackName TEXT,
         trackNumber INTEGER,
-        PRIMARY KEY (raceId) ON CONFLICT REPLACE);
+        PRIMARY KEY (raceId) ON CONFLICT IGNORE);
 """
 INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
