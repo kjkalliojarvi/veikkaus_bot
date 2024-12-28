@@ -70,7 +70,7 @@ class Race(BaseModel):
     reserveHorsesOrder: Optional[str] = None
     raceRider: str
     trackProfile: str
-    trackSurface: str
+    trackSurface: Optional[str] = None
 
     def get_runners(self):
         runners = []
