@@ -13,13 +13,12 @@ CREATE_RUNNER_TABLE = """
         birthdate TEXT,
         gender TEXT,
         coachName TEXT,
-        coachNameInitials TEXT,
         onwerName TEXT,
         ownerHomeTown TEXT,
         PRIMARY KEY (runnerId) ON CONFLICT REPLACE);
 """
 
-INSERT_RUNNER = 'INSERT INTO runner VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+INSERT_RUNNER = 'INSERT INTO runner VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
 CREATE_START_TABLE = """
     CREATE TABLE IF NOT EXISTS start(
@@ -46,7 +45,7 @@ CREATE_START_TABLE = """
         specialCart TEXT,
         coachName TEXT,
         startInterval INTEGER,
-        PRIMARY KEY (runnerId, priorStartId) ON CONFLICT REPLACE);
+        PRIMARY KEY (runnerId, raceNumber, shortMeetDate) ON CONFLICT REPLACE);
 """
 INSERT_START = 'INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
