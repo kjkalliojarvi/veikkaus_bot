@@ -224,7 +224,6 @@ class Runner(BaseModel):
                 self.birthDate.year,
                 self.gender,
                 self.coachName,
-                self.coachNameInitials,
                 self.ownerName,
                 self.ownerHomeTown)
 
