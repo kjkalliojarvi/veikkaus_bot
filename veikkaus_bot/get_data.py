@@ -38,6 +38,8 @@ class Card(BaseModel):
     epgChannel: int
     jackpotPools: list[dict]
     bonusPools: list[dict]
+    fullHitPotPools: list[dict]
+    vowedPayoutPools: list[dict]
 
     def get_races(self):
         races = []
@@ -66,11 +68,12 @@ class Race(BaseModel):
     monte: bool
     firstPrize: int
     startTime: int
+    intermediateTimesString: Optional[str] = None
     toteResultString: Optional[str] = None
     reserveHorsesOrder: Optional[str] = None
     raceRider: str
     trackProfile: str
-    trackSurface: Optional[str] = None
+    photoFinishUrl: Optional[str] = None
 
     def get_runners(self):
         runners = []
@@ -161,6 +164,7 @@ class PrevStart(BaseModel):
     startTrack: int
     result: Optional[str] = None
     trackCode: str
+    trackName: str
     winOdd: Optional[str] = None
     kmTime: Optional[str] = None
     frontShoes: str
@@ -209,6 +213,7 @@ class Runner(BaseModel):
     coachNameInitials: str
     ownerName: str
     ownerHomeTown: Optional[str] = None
+    handicapRating: Optional[int] = None
     specialCart: str
     condition: Optional[int] = None
     expectedValue: Optional[int] = None
