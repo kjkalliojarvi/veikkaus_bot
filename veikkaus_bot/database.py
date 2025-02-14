@@ -63,7 +63,6 @@ CREATE_RACE_TABLE = """
         startTime INTEGER,
         toteResultString TEXT,
         trackProfile TEXT,
-        trackSurface TEXT,
         country TEXT,
         trackAbbreviation TEXT,
         trackName TEXT,
