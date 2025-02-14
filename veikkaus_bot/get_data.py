@@ -95,7 +95,6 @@ class Race(BaseModel):
                 self.startTime,
                 self.toteResultString,
                 self.trackProfile,
-                self.trackSurface,
                 card.country,
                 card.trackAbbreviation,
                 card.trackName,
