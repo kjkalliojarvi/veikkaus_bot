@@ -318,7 +318,7 @@ class VeikkausData:
         data = self.to_json()
         timestamp = datetime.now()
         filename = f'{timestamp.year}-{timestamp.month}-{timestamp.day}-{self.country}.json'
-        with open(filename, 'w') as outfile:
+        with open('data/'+filename, 'w') as outfile:
             json.dump(data, outfile)
         print(f'{filename} tallennettu.')
 
