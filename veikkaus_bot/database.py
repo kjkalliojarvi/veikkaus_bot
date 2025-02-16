@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 import json
+from .get_data import VeikkausData
 
 
 CREATE_RUNNER_TABLE = """
@@ -104,7 +105,12 @@ class Db:
         with db_ops(self.db_name) as cur:
             cur.executemany(INSERT_START, starts)
 
-    def store_file_to_db(self, jsonfile: str):
+    def store_data(self, data: VeikkausData):
+        self.store_races(data.to_json(['races']))
+        self.store_runners(data.to_json(['runners']))
+        self.store_starts(data.to_json(['starts']))
+
+    def store_file(self, jsonfile: str):
         with open(jsonfile, 'r') as openfile:
             json_object = json.load(openfile)
         self.store_races(json_object['races'])
