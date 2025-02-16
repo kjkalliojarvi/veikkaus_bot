@@ -1,1 +1,2 @@
 wheel==0.43.0
+setuptools==75.8.0

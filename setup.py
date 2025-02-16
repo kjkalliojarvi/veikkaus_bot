@@ -46,7 +46,7 @@ setup(
     test_suite='tests',
     tests_require=test_requirements,
     url='https://github.com/kjkalliojarvi/veikkaus_bot',
-    version='0.0.1',
+    version='0.1.0',
     zip_safe=False,
     entry_points={
         'console_scripts':[
