@@ -3,7 +3,7 @@ import datetime
 import signal
 import sys
 
-from .general import show_cards, show_card
+from .get_data import fi_se
 
 PACKAGE_NAME = 'veikkaus_bot'
 PVM = datetime.datetime.now().strftime("%d%m%Y")
@@ -18,7 +18,7 @@ def sigterm_exit(_sig_func=None):
     sys.exit(0)
 
 
-def veikka():
+def veikkaus():
     register_exit_handler(sigterm_exit)
 
     sys.argv[0] = PACKAGE_NAME
@@ -26,14 +26,13 @@ def veikka():
 
     subparser = parser.add_subparsers(title='Commands', dest='command')
 
-    parser_cards = subparser.add_parser('cards', help='Ravit tänään')
-    parser_cards.add_argument('-c', '--country', help='Maa')
-    parser_cards.set_defaults(func=show_cards)
+    parser_cards = subparser.add_parser('fi_se')
+    parser_cards.set_defaults(func=fi_se)
 
-    parser_card = subparser.add_parser('card', help='Ravit')
-    parser_card.add_argument('-n', '--name', help='Radan nimi')
-    parser_card.add_argument('-a', '--abbreviation', help='Lyhenne')
-    parser_card.set_defaults(func=show_card)
+    #parser_card = subparser.add_parser('card', help='Ravit')
+    #parser_card.add_argument('-n', '--name', help='Radan nimi')
+    #parser_card.add_argument('-a', '--abbreviation', help='Lyhenne')
+    #parser_card.set_defaults(func=show_card)
 
     #parser_race = subparser.add_parser('race', help='Lähtö')
     #parser_race.add_argument('raceNumber', help='Lähtö')
@@ -51,4 +50,4 @@ def veikka():
 
 
 if __name__ == '__main__':
-    veikka()
+    veikkaus()

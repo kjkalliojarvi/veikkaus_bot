@@ -12,10 +12,10 @@ with open('HISTORY.rst') as history_file:
     history = history_file.read()
 
 requirements = [
-    'pydantic'=='2.6.4',
-    'requests'=='2.31.0',
-    'sqlalchemy'=='2.0.29',
-    'python-decouple'=='3.8'
+    'pydantic==2.6.4',
+    'requests==2.31.0',
+    'sqlalchemy==2.0.29',
+    'python-decouple==3.8'
 ]
 
 setup_requirements = [ ]
@@ -50,7 +50,7 @@ setup(
     zip_safe=False,
     entry_points={
         'console_scripts':[
-            'veikka=veikkaus_bot.__main__:veikka'
+            'veikkaus=veikkaus_bot.__main__:veikkaus'
         ]
     },
 )

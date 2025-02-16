@@ -6,7 +6,6 @@ from typing import Optional
 from pydantic import BaseModel
 import requests
 import json
-from .database import Db
 
 
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
@@ -297,7 +296,7 @@ class VeikkausData:
         self.runners: list[Runner] = all_runners
         print(f'{len(self.cards)} ravit, {len(self.races)} lähtöä, {len(self.runners)} hevosta.')
 
-    def save_to_file(self):
+    def to_json(self):
         race_records = []
         runner_records = []
         start_records = []
@@ -313,10 +312,15 @@ class VeikkausData:
             'runners': runner_records,
             'starts': start_records
         }
+        return data
+
+    def save_to_file(self):
+        data = self.to_json()
         timestamp = datetime.now()
         filename = f'{timestamp.year}-{timestamp.month}-{timestamp.day}-{self.country}.json'
         with open(filename, 'w') as outfile:
             json.dump(data, outfile)
+        print(f'{filename} tallennettu.')
 
 
 def _get_collection(url: str) -> dict:
@@ -345,3 +349,15 @@ def get_previous_starts(runner: Runner) -> list:
     print(Stat(**runner.stats['currentYear']))
     print(Stat(**runner.stats['previousYear']))
     print(Stat(**runner.stats['total']))
+
+
+def fi_se(args):
+    suomi = VeikkausData('FI')
+    ruotsi = VeikkausData('SE')
+
+    suomi.save_to_file()
+    ruotsi.save_to_file()
+
+
+if __name__ == '__main__':
+    fi_se(None)
