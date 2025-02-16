@@ -26,4 +26,4 @@ jobs:
 
       - name: Load data
         run: |
-          python fi_se_load.py
+          python get_data.py
