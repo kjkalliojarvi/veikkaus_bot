@@ -27,3 +27,9 @@ jobs:
       - name: Load data
         run: |
           python veikkaus_bot/get_data.py
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: data upload
+          path: data
