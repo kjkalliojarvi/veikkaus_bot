@@ -26,4 +26,4 @@ jobs:
 
       - name: Load data
         run: |
-          python get_data.py
+          python veikkaus_bot/get_data.py
