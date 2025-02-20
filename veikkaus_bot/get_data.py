@@ -60,7 +60,7 @@ class Race(BaseModel):
     cardId: int
     number: int
     distance: int
-    breed: str
+    breed: Optional[str] = None
     seriesSpecification: str
     raceStatus: str
     startType: str
@@ -352,11 +352,16 @@ def get_previous_starts(runner: Runner) -> list:
 
 
 def fi_se(args):
-    suomi = VeikkausData('FI')
-    ruotsi = VeikkausData('SE')
-
-    suomi.save_to_file()
-    ruotsi.save_to_file()
+    try:
+        suomi = VeikkausData('FI')
+        suomi.save_to_file()
+    except Exception as e:
+        print(e)
+    try:
+        ruotsi = VeikkausData('SE')
+        ruotsi.save_to_file()
+    except Exception as e:
+        print(e)
 
 
 if __name__ == '__main__':
