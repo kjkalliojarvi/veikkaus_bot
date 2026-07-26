@@ -1,4 +1,5 @@
-from decouple import config
+import os
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, MetaData, Table, Column, Integer, String, Boolean
 from sqlalchemy.schema import PrimaryKeyConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -6,7 +7,8 @@ import sqlite3
 from typing import List, Optional
 
 
-# DB_FILE = config('DB_FILE')
+load_dotenv()
+# DB_FILE = os.getenv('DB_FILE')
 DB_FILE = '/home/kari/python/veikkaus_bot/veikkaus_data.db'
 sqlite_string = f'sqlite+pysqlite:///{DB_FILE}'
 engine = create_engine(sqlite_string, echo=True)

@@ -1,28 +1,13 @@
-.PHONY: clean clean-test clean-pyc clean-build docs help
+.PHONY: clean clean-test clean-pyc clean-build help
 .DEFAULT_GOAL := help
-PIPFLAGS ?= --disable-pip-version-check --no-cache-dir
-PYTHON_VERSION ?= python3.11
 
-DEPS = $(shell git ls-files)
+.PHONY: install
+install: ## install the project and dependencies into a uv-managed venv
+	uv sync
 
-.PHONY: all
-all: .built
-
-.built: $(DEPS) .pipenv .pipdevenv
-	touch $@
-
-.pipenv: requirements.txt Makefile .venv/bin/activate
-	. .venv/bin/activate && [ ! -s $< ] || $(PYTHON_VERSION) -m pip install $(PIPFLAGS) -r $<
-
-.pipdevenv: requirements_dev.txt Makefile .venv/bin/activate
-	. .venv/bin/activate && [ ! -s $< ] || $(PYTHON_VERSION) -m pip install $(PIPFLAGS) -r $<
-
-.venv/bin/activate:
-	[ -f .venv/bin/activate ] || ($(PYTHON_VERSION) -m venv --prompt veikkaus_bot .venv \
-		&& . .venv/bin/activate && pip install --upgrade --force-reinstall pip setuptools)
-
-.clean_venv:
-	rm -rf .venv
+.PHONY: run-tests
+run-tests: install ## run the test suite
+	uv run pytest tests
 
 clean: clean-build clean-pyc clean-test ## remove all build, test, coverage and Python artifacts
 
@@ -45,34 +30,14 @@ clean-test: ## remove test and coverage artifacts
 	rm -fr htmlcov/
 	rm -fr .pytest_cache
 
-.PHONY: run-tests
-run-tests: .built
-	. .venv/bin/activate && python -m pytest tests
+coverage: install ## check code coverage quickly
+	uv run coverage run --source veikkaus_bot -m pytest tests
+	uv run coverage report -m
+	uv run coverage html
 
-coverage: ## check code coverage quickly with the default Python
-	coverage run --source veikkaus_bot setup.py test
-	coverage report -m
-	coverage html
-	$(BROWSER) htmlcov/index.html
-
-docs: ## generate Sphinx HTML documentation, including API docs
-	rm -f docs/veikkaus.rst
-	rm -f docs/modules.rst
-	sphinx-apidoc -o docs/ veikkaus_bot
-	$(MAKE) -C docs clean
-	$(MAKE) -C docs html
-	$(BROWSER) docs/_build/html/index.html
-
-servedocs: docs ## compile the docs watching for changes
-	watchmedo shell-command -p '*.rst' -c '$(MAKE) -C docs html' -R -D .
-
-release: dist ## package and upload a release
-	twine upload dist/*
-
-dist: clean ## builds source and wheel package
-	python setup.py sdist
-	python setup.py bdist_wheel
+dist: clean ## build source and wheel package
+	uv build
 	ls -l dist
 
-install: clean ## install the package to the active Python's site-packages
-	python setup.py install
+release: dist ## package and upload a release
+	uv publish
