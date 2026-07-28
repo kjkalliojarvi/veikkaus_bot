@@ -3,7 +3,7 @@ import datetime
 import signal
 import sys
 
-from .get_data import fi_se
+from .get_data_json import fi_se
 
 PACKAGE_NAME = 'veikkaus_bot'
 PVM = datetime.datetime.now().strftime("%d%m%Y")

@@ -11,7 +11,7 @@ Fetches Finnish/Swedish harness racing (ravit) data from the Veikkaus open REST 
 ```bash
 uv sync                                    # install deps into .venv (make install)
 uv run veikkaus fi_se                      # run the CLI: fetch FI + SE data, write data/*.json
-uv run python veikkaus_bot/get_data.py     # same as fi_se, invoked directly (used by CI)
+uv run python veikkaus_bot/get_data_json.py  # same as fi_se, invoked directly (used by CI)
 uv run pytest tests                        # run tests (make run-tests) — see caveat below
 uv build                                   # build sdist + wheel (make dist)
 ```
@@ -22,7 +22,7 @@ The CLI entry point is `veikkaus` (defined in `[project.scripts]` → `veikkaus_
 
 ## Architecture
 
-**`get_data.py` is the core.** Everything else consumes it.
+**`get_data_json.py` is the core.** Everything else consumes it.
 
 - **API models** (Pydantic `BaseModel`): `Card` → `Race` → `Runner`, mirroring the API's nested resource hierarchy. Each model has `get_*` methods that lazily fetch its children via the module-level `_get_collection` / `_get_dict` helpers (e.g. `Card.get_races()`, `Race.get_runners()`). `Pool`/`Stat`/`Runner.prevStarts` model auxiliary data.
 - **`VeikkausData(country)`** eagerly walks the full Card→Race→Runner tree on construction, flattening into `self.cards/races/runners`. `to_json()` reshapes these into positional tuple records (`races`, `runners`, `starts`) via the `*_record()` methods on the models — column order in those tuples must stay in sync with the DB `INSERT` statements. `save_to_file()` dumps to `data/{Y}-{M}-{D}-{country}.json`.
@@ -33,8 +33,8 @@ The CLI entry point is `veikkaus` (defined in `[project.scripts]` → `veikkaus_
 - `database.py` — the working one. Raw `sqlite3` with a `db_ops` context manager and `Db` class. `store_file()` loads a saved JSON dump; `store_data()` consumes a `VeikkausData` directly. Table column order matches the `to_json()` tuples.
 - `database2.py` — an incomplete SQLAlchemy 2.0 ORM rewrite (declarative `RunnerTable`/`StartTable`/`RaceTable`). `create_db()` references undefined `CREATE_*` names and `DB_FILE` is hardcoded to an absolute path — not functional; treat as WIP unless actively completing it.
 
-**Pipeline:** `__main__.veikkaus()` (argparse, single `fi_se` subcommand) → `get_data.fi_se()` fetches FI then SE, each wrapped in its own try/except so one country failing doesn't block the other → JSON files in `data/`.
+**Pipeline:** `__main__.veikkaus()` (argparse, single `fi_se` subcommand) → `get_data_json.fi_se()` fetches FI then SE, each wrapped in its own try/except so one country failing doesn't block the other → JSON files in `data/`.
 
 ## Automation
 
-`.github/workflows/fi_se_load.yml` runs daily at 21:55 UTC (and on manual dispatch): `uv sync --frozen`, `mkdir data`, run `get_data.py`, upload `data/` as a build artifact. No database step in CI — it only captures the JSON snapshots.
+`.github/workflows/fi_se_load.yml` runs daily at 21:55 UTC (and on manual dispatch): `uv sync --frozen`, `mkdir data`, run `get_data_json.py`, upload `data/` as a build artifact. No database step in CI — it only captures the JSON snapshots.

@@ -1,7 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 import json
-from .get_data import VeikkausData
+from .get_data_json import VeikkausData
 
 
 CREATE_RUNNER_TABLE = """

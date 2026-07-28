@@ -26,7 +26,7 @@ jobs:
 
       - name: Load data
         run: |
-          uv run python veikkaus_bot/get_data.py
+          uv run python veikkaus_bot/get_data_json.py
 
       - name: Upload
         uses: actions/upload-artifact@v4

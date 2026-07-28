@@ -24,7 +24,7 @@ The `fi_se` command walks the full `Card → Race → Runner` tree from the API 
 
 ## How it works
 
-- `veikkaus_bot/get_data.py` — Pydantic models for the API resources (`Card`, `Race`, `Runner`, `Pool`, ...), the `VeikkausData` aggregator that fetches and flattens the data, and the `fi_se` entry point.
+- `veikkaus_bot/get_data_json.py` — Pydantic models for the API resources (`Card`, `Race`, `Runner`, `Pool`, ...), the `VeikkausData` aggregator that fetches and flattens the data, and the `fi_se` entry point.
 - `veikkaus_bot/database.py` — SQLite storage (`Db`) for loading the saved JSON dumps into `runner`, `race`, and `start` tables.
 
 Data is refreshed automatically each day by the `fi-se data load` GitHub Actions workflow (`.github/workflows/fi_se_load.yml`), which runs the fetch and uploads the resulting `data/` directory as a build artifact.

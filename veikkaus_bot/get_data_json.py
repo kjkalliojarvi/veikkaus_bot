@@ -3,6 +3,7 @@ from datetime import date, datetime
 from enum import Enum
 from functools import lru_cache
 from typing import Optional
+import os
 from pydantic import BaseModel
 import requests
 import json
@@ -10,6 +11,8 @@ import json
 
 headers = {'Content-type':'application/json', 'Accept':'application/json', 'X-ESA-API-Key':'ROBOT'}
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
+PROSENTIT_FOLDER = os.environ.get('PROSENTIT_FOLDER')
+PVM = datetime.now().strftime("%y%m%d")
 
 
 class Card(BaseModel):
@@ -282,6 +285,7 @@ class VeikkausData:
         all_cards = []
         all_races = []
         all_runners = []
+        all_pools = []
         cards = get_cards(self.country)
         for card in cards:
             all_cards.append(card)
@@ -291,10 +295,14 @@ class VeikkausData:
                 runners = race.get_runners()
                 for runner in runners:
                     all_runners.append(runner)
+                pools = race.get_race_pools()
+                for pool in pools:
+                    all_pools.append(pool)
         self.cards: list[Card] = all_cards
         self.races: list[Race] = all_races
         self.runners: list[Runner] = all_runners
-        print(f'{len(self.cards)} ravit, {len(self.races)} lähtöä, {len(self.runners)} hevosta.')
+        self.pools: list[Pool] = all_pools
+        print(f'{len(self.cards)} ravit, {len(self.races)} lähtöä, {len(self.runners)} hevosta, {len(self.pools)} pelipoolia haettu {self.country}.')
 
     def to_json(self):
         race_records = []
