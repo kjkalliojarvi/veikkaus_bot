@@ -158,6 +158,7 @@ class PrevStart(BaseModel):
     priorStartId: int
     distance: int
     driver: Optional[str] = None
+    driverFullName: Optional[str] = None
     meetDate: str
     raceNumber: int
     shortMeetDate: str
@@ -220,6 +221,7 @@ class Runner(BaseModel):
     expectedValue: Optional[int] = None
     stats: dict
     prevStarts: list[PrevStart]
+    betPercentages: Optional[dict] = None
 
     def runner_record(self) -> tuple:
         return (self.runnerId,
@@ -245,6 +247,7 @@ class Runner(BaseModel):
                     start.priorStartId,
                     start.distance,
                     start.driver,
+                    start.driverFullName,
                     start.meetDate,
                     start.raceNumber,
                     start.shortMeetDate,
@@ -266,6 +269,48 @@ class Runner(BaseModel):
                     diff.days))
                 previousdate = start.meetDate
         return starts
+
+    def stats_records(self) -> list[tuple]:
+        """One record per statistics period (currentYear/previousYear/total).
+
+        Column order must stay in sync with database.INSERT_STAT.
+        """
+        records = []
+        for period in ('currentYear', 'previousYear', 'total'):
+            raw = self.stats.get(period)
+            if raw is None:
+                continue
+            stat = Stat(**raw)
+            records.append((
+                self.runnerId,
+                period,
+                stat.year,
+                stat.record1,
+                stat.record2,
+                stat.starts,
+                stat.position1,
+                stat.position2,
+                stat.position3,
+                stat.places,
+                stat.winMoney,
+                stat.gallopPercent,
+                stat.disqualificationPercent,
+                stat.placementPercent,
+                stat.winningPercent))
+        return records
+
+    def betpercentages_record(self) -> list[tuple]:
+        """One record per pool type in betPercentages (e.g. KAK, T5).
+
+        Column order must stay in sync with database.INSERT_BETPERCENTAGE.
+        """
+        records = []
+        for pool_type, values in (self.betPercentages or {}).items():
+            records.append((
+                self.runnerId,
+                pool_type,
+                values.get('percentage')))
+        return records
 
 
 class PoolTypes(Enum):
@@ -308,6 +353,8 @@ class VeikkausData:
         race_records = []
         runner_records = []
         start_records = []
+        stat_records = []
+        betpercentage_records = []
         for race in self.races:
             for card in self.cards:
                 if card.cardId == race.cardId:
@@ -315,10 +362,14 @@ class VeikkausData:
         for runner in self.runners:
             runner_records.append(runner.runner_record())
             start_records += runner.prevstarts_record()
+            stat_records += runner.stats_records()
+            betpercentage_records += runner.betpercentages_record()
         data = {
             'races': race_records,
             'runners': runner_records,
-            'starts': start_records
+            'starts': start_records,
+            'stats': stat_records,
+            'betpercentages': betpercentage_records
         }
         return data
 

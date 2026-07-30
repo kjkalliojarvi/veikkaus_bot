@@ -27,6 +27,7 @@ CREATE_START_TABLE = """
         priorStartId INTEGER,
         distance INTEGER,
         driver TEXT,
+        driverFullName TEXT,
         meetDate TEXT,
         raceNumber INTEGER,
         shortMeetDate TEXT,
@@ -48,7 +49,7 @@ CREATE_START_TABLE = """
         startInterval INTEGER,
         PRIMARY KEY (runnerId, raceNumber, shortMeetDate) ON CONFLICT REPLACE);
 """
-INSERT_START = 'INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+INSERT_START = 'INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
 CREATE_RACE_TABLE = """
     CREATE TABLE IF NOT EXISTS race(
@@ -70,7 +71,37 @@ CREATE_RACE_TABLE = """
         trackNumber INTEGER,
         PRIMARY KEY (raceId) ON CONFLICT IGNORE);
 """
-INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+
+CREATE_STAT_TABLE = """
+    CREATE TABLE IF NOT EXISTS stat(
+        runnerId INTEGER,
+        period TEXT,
+        year TEXT,
+        record1 TEXT,
+        record2 TEXT,
+        starts INTEGER,
+        position1 INTEGER,
+        position2 INTEGER,
+        position3 INTEGER,
+        places INTEGER,
+        winMoney INTEGER,
+        gallopPercent INTEGER,
+        disqualificationPercent INTEGER,
+        placementPercent INTEGER,
+        winningPercent INTEGER,
+        PRIMARY KEY (runnerId, period) ON CONFLICT REPLACE);
+"""
+INSERT_STAT = 'INSERT INTO stat VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+
+CREATE_BETPERCENTAGE_TABLE = """
+    CREATE TABLE IF NOT EXISTS bet_percentage(
+        runnerId INTEGER,
+        poolType TEXT,
+        percentage INTEGER,
+        PRIMARY KEY (runnerId, poolType) ON CONFLICT REPLACE);
+"""
+INSERT_BETPERCENTAGE = 'INSERT INTO bet_percentage VALUES (?, ?, ?);'
 
 
 @contextmanager
@@ -90,6 +121,8 @@ class Db:
             cur.execute(CREATE_RUNNER_TABLE)
             cur.execute(CREATE_START_TABLE)
             cur.execute(CREATE_RACE_TABLE)
+            cur.execute(CREATE_STAT_TABLE)
+            cur.execute(CREATE_BETPERCENTAGE_TABLE)
 
     def store_races(self, races):
         with db_ops(self.db_name) as cur:
@@ -105,10 +138,21 @@ class Db:
         with db_ops(self.db_name) as cur:
             cur.executemany(INSERT_START, starts)
 
+    def store_stats(self, stats):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_STAT, stats)
+
+    def store_betpercentages(self, betpercentages):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_BETPERCENTAGE, betpercentages)
+
     def store_data(self, data: VeikkausData):
-        self.store_races(data.to_json(['races']))
-        self.store_runners(data.to_json(['runners']))
-        self.store_starts(data.to_json(['starts']))
+        records = data.to_json()
+        self.store_races(records['races'])
+        self.store_runners(records['runners'])
+        self.store_starts(records['starts'])
+        self.store_stats(records['stats'])
+        self.store_betpercentages(records['betpercentages'])
 
     def store_file(self, jsonfile: str):
         with open(jsonfile, 'r') as openfile:
@@ -116,12 +160,33 @@ class Db:
         self.store_races(json_object['races'])
         self.store_runners(json_object['runners'])
         self.store_starts(json_object['starts'])
+        self.store_stats(json_object.get('stats', []))
+        self.store_betpercentages(json_object.get('betpercentages', []))
 
     def query_runner(self, name):
         with db_ops(self.db_name) as cur:
             res = list(cur.execute("SELECT runnerId FROM runner WHERE horseName='%s'" %  name))
             res2 = list(cur.execute("SELECT * FROM start WHERE runnerId='%d'" % res[0]))
         return res2
+
+
+DEFAULT_DB = 'veikkaus_data.db'
+
+
+def load(args):
+    """CLI handler: load one or more saved JSON dumps into a SQLite database.
+
+    Creates the tables if they don't exist, then loads each file. Each file
+    is wrapped so a bad dump doesn't abort the rest of the batch.
+    """
+    db = Db(getattr(args, 'db', None) or DEFAULT_DB)
+    db.create()
+    for jsonfile in args.jsonfile:
+        try:
+            db.store_file(jsonfile)
+            print(f'{jsonfile} loaded into {db.db_name}.')
+        except Exception as e:
+            print(f'{jsonfile}: {e}')
 
 
 """

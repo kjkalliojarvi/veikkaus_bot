@@ -28,6 +28,10 @@ jobs:
         run: |
           uv run python veikkaus_bot/get_data_json.py
 
+      - name: Load into SQLite
+        run: |
+          uv run veikkaus load data/*.json --db data/veikkaus_data.db
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:

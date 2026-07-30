@@ -42,6 +42,7 @@ class StartTable(Base):
     priorStartId: Mapped[int] = mapped_column(primary_key=True)
     distance: Mapped[int]
     driver: Mapped[str]
+    driverFullName: Mapped[str]
     meetDate: Mapped[str]
     raceNumber: Mapped[int]
     shortMeetDate:Mapped[str]
@@ -61,6 +62,34 @@ class StartTable(Base):
     specialCart: Mapped[str]
     coachName: Mapped[str]
     startInterval: Mapped[int]
+
+
+class StatTable(Base):
+    __tablename__ = 'stat'
+
+    runnerId: Mapped[int] = mapped_column(primary_key=True)
+    period: Mapped[str] = mapped_column(primary_key=True)
+    year: Mapped[str]
+    record1: Mapped[Optional[str]]
+    record2: Mapped[Optional[str]]
+    starts: Mapped[int]
+    position1: Mapped[int]
+    position2: Mapped[int]
+    position3: Mapped[int]
+    places: Mapped[int]
+    winMoney: Mapped[int]
+    gallopPercent: Mapped[Optional[int]]
+    disqualificationPercent: Mapped[Optional[int]]
+    placementPercent: Mapped[Optional[int]]
+    winningPercent: Mapped[Optional[int]]
+
+
+class BetPercentageTable(Base):
+    __tablename__ = 'bet_percentage'
+
+    runnerId: Mapped[int] = mapped_column(primary_key=True)
+    poolType: Mapped[str] = mapped_column(primary_key=True)
+    percentage: Mapped[Optional[int]]
 
 
 class RaceTable(Base):
