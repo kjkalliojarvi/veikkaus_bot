@@ -164,10 +164,22 @@ class Db:
         self.store_betpercentages(json_object.get('betpercentages', []))
 
     def query_runner(self, name):
+        """All previous starts of a runner by horse name, oldest first."""
         with db_ops(self.db_name) as cur:
-            res = list(cur.execute("SELECT runnerId FROM runner WHERE horseName='%s'" %  name))
-            res2 = list(cur.execute("SELECT * FROM start WHERE runnerId='%d'" % res[0]))
-        return res2
+            res = list(cur.execute(
+                """SELECT s.* FROM start s
+                   JOIN runner r ON r.runnerId = s.runnerId
+                   WHERE r.horseName = ?
+                   ORDER BY s.meetDate""", (name,)))
+        return res
+
+    def query_starts(self, runner_id: int):
+        """All previous starts of a runner by runnerId, oldest first."""
+        with db_ops(self.db_name) as cur:
+            res = list(cur.execute(
+                'SELECT * FROM start WHERE runnerId = ? ORDER BY meetDate',
+                (runner_id,)))
+        return res
 
 
 DEFAULT_DB = 'veikkaus_data.db'
