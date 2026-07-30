@@ -37,10 +37,8 @@ def fetch_card_pools(card_id: int) -> list[dict]:
 
 def fetch_race_odds(pool_id: int) -> dict:
     """Fetch odds for a pool from the Veikkaus REST API."""
-    for p in ({"offset": 20}, {"page": 2}, {"start": 20}, {"from": 20}):
-        response = requests.get(POOL_ODDS_URL.format(pool_id=pool_id), headers=headers, params=p, timeout=10)
-        response.raise_for_status()
-        print(response.json())
+    response = requests.get(POOL_ODDS_URL.format(pool_id=pool_id), headers=headers, timeout=10)
+    response.raise_for_status()
     return response.json()
 
 
