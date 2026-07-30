@@ -181,6 +181,29 @@ class Db:
                 (runner_id,)))
         return res
 
+    def query_stats(self, name):
+        """A runner's statistics by horse name, one row per period
+        (currentYear/previousYear/total)."""
+        with db_ops(self.db_name) as cur:
+            res = list(cur.execute(
+                """SELECT s.* FROM stat s
+                   JOIN runner r ON r.runnerId = s.runnerId
+                   WHERE r.horseName = ?
+                   ORDER BY s.period""", (name,)))
+        return res
+
+    def query_betpercentages(self, name):
+        """A runner's bet percentages by horse name, one row per pool type.
+
+        Percentages are hundredths of a percent (939 = 9.39 %)."""
+        with db_ops(self.db_name) as cur:
+            res = list(cur.execute(
+                """SELECT b.* FROM bet_percentage b
+                   JOIN runner r ON r.runnerId = b.runnerId
+                   WHERE r.horseName = ?
+                   ORDER BY b.poolType""", (name,)))
+        return res
+
 
 DEFAULT_DB = 'veikkaus_data.db'
 
