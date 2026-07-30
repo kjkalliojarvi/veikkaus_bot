@@ -72,6 +72,27 @@ CREATE_RACE_TABLE = """
 """
 INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
+CREATE_STAT_TABLE = """
+    CREATE TABLE IF NOT EXISTS stat(
+        runnerId INTEGER,
+        period TEXT,
+        year TEXT,
+        record1 TEXT,
+        record2 TEXT,
+        starts INTEGER,
+        position1 INTEGER,
+        position2 INTEGER,
+        position3 INTEGER,
+        places INTEGER,
+        winMoney INTEGER,
+        gallopPercent INTEGER,
+        disqualificationPercent INTEGER,
+        placementPercent INTEGER,
+        winningPercent INTEGER,
+        PRIMARY KEY (runnerId, period) ON CONFLICT REPLACE);
+"""
+INSERT_STAT = 'INSERT INTO stat VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+
 
 @contextmanager
 def db_ops(db_name):
@@ -90,6 +111,7 @@ class Db:
             cur.execute(CREATE_RUNNER_TABLE)
             cur.execute(CREATE_START_TABLE)
             cur.execute(CREATE_RACE_TABLE)
+            cur.execute(CREATE_STAT_TABLE)
 
     def store_races(self, races):
         with db_ops(self.db_name) as cur:
@@ -105,10 +127,16 @@ class Db:
         with db_ops(self.db_name) as cur:
             cur.executemany(INSERT_START, starts)
 
+    def store_stats(self, stats):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_STAT, stats)
+
     def store_data(self, data: VeikkausData):
-        self.store_races(data.to_json(['races']))
-        self.store_runners(data.to_json(['runners']))
-        self.store_starts(data.to_json(['starts']))
+        records = data.to_json()
+        self.store_races(records['races'])
+        self.store_runners(records['runners'])
+        self.store_starts(records['starts'])
+        self.store_stats(records['stats'])
 
     def store_file(self, jsonfile: str):
         with open(jsonfile, 'r') as openfile:
@@ -116,6 +144,7 @@ class Db:
         self.store_races(json_object['races'])
         self.store_runners(json_object['runners'])
         self.store_starts(json_object['starts'])
+        self.store_stats(json_object.get('stats', []))
 
     def query_runner(self, name):
         with db_ops(self.db_name) as cur:

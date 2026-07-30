@@ -63,6 +63,26 @@ class StartTable(Base):
     startInterval: Mapped[int]
 
 
+class StatTable(Base):
+    __tablename__ = 'stat'
+
+    runnerId: Mapped[int] = mapped_column(primary_key=True)
+    period: Mapped[str] = mapped_column(primary_key=True)
+    year: Mapped[str]
+    record1: Mapped[Optional[str]]
+    record2: Mapped[Optional[str]]
+    starts: Mapped[int]
+    position1: Mapped[int]
+    position2: Mapped[int]
+    position3: Mapped[int]
+    places: Mapped[int]
+    winMoney: Mapped[int]
+    gallopPercent: Mapped[Optional[int]]
+    disqualificationPercent: Mapped[Optional[int]]
+    placementPercent: Mapped[Optional[int]]
+    winningPercent: Mapped[Optional[int]]
+
+
 class RaceTable(Base):
     __tablename__ = 'race'
 
