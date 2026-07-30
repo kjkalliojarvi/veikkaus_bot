@@ -27,6 +27,7 @@ CREATE_START_TABLE = """
         priorStartId INTEGER,
         distance INTEGER,
         driver TEXT,
+        driverFullName TEXT,
         meetDate TEXT,
         raceNumber INTEGER,
         shortMeetDate TEXT,
@@ -48,7 +49,7 @@ CREATE_START_TABLE = """
         startInterval INTEGER,
         PRIMARY KEY (runnerId, raceNumber, shortMeetDate) ON CONFLICT REPLACE);
 """
-INSERT_START = 'INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+INSERT_START = 'INSERT INTO start VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
 CREATE_RACE_TABLE = """
     CREATE TABLE IF NOT EXISTS race(
@@ -93,6 +94,15 @@ CREATE_STAT_TABLE = """
 """
 INSERT_STAT = 'INSERT INTO stat VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
+CREATE_BETPERCENTAGE_TABLE = """
+    CREATE TABLE IF NOT EXISTS bet_percentage(
+        runnerId INTEGER,
+        poolType TEXT,
+        percentage INTEGER,
+        PRIMARY KEY (runnerId, poolType) ON CONFLICT REPLACE);
+"""
+INSERT_BETPERCENTAGE = 'INSERT INTO bet_percentage VALUES (?, ?, ?);'
+
 
 @contextmanager
 def db_ops(db_name):
@@ -112,6 +122,7 @@ class Db:
             cur.execute(CREATE_START_TABLE)
             cur.execute(CREATE_RACE_TABLE)
             cur.execute(CREATE_STAT_TABLE)
+            cur.execute(CREATE_BETPERCENTAGE_TABLE)
 
     def store_races(self, races):
         with db_ops(self.db_name) as cur:
@@ -131,12 +142,17 @@ class Db:
         with db_ops(self.db_name) as cur:
             cur.executemany(INSERT_STAT, stats)
 
+    def store_betpercentages(self, betpercentages):
+        with db_ops(self.db_name) as cur:
+            cur.executemany(INSERT_BETPERCENTAGE, betpercentages)
+
     def store_data(self, data: VeikkausData):
         records = data.to_json()
         self.store_races(records['races'])
         self.store_runners(records['runners'])
         self.store_starts(records['starts'])
         self.store_stats(records['stats'])
+        self.store_betpercentages(records['betpercentages'])
 
     def store_file(self, jsonfile: str):
         with open(jsonfile, 'r') as openfile:
@@ -145,6 +161,7 @@ class Db:
         self.store_runners(json_object['runners'])
         self.store_starts(json_object['starts'])
         self.store_stats(json_object.get('stats', []))
+        self.store_betpercentages(json_object.get('betpercentages', []))
 
     def query_runner(self, name):
         with db_ops(self.db_name) as cur:

@@ -42,6 +42,7 @@ class StartTable(Base):
     priorStartId: Mapped[int] = mapped_column(primary_key=True)
     distance: Mapped[int]
     driver: Mapped[str]
+    driverFullName: Mapped[str]
     meetDate: Mapped[str]
     raceNumber: Mapped[int]
     shortMeetDate:Mapped[str]
@@ -81,6 +82,14 @@ class StatTable(Base):
     disqualificationPercent: Mapped[Optional[int]]
     placementPercent: Mapped[Optional[int]]
     winningPercent: Mapped[Optional[int]]
+
+
+class BetPercentageTable(Base):
+    __tablename__ = 'bet_percentage'
+
+    runnerId: Mapped[int] = mapped_column(primary_key=True)
+    poolType: Mapped[str] = mapped_column(primary_key=True)
+    percentage: Mapped[Optional[int]]
 
 
 class RaceTable(Base):
