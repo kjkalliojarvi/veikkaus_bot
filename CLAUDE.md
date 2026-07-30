@@ -11,6 +11,7 @@ Fetches Finnish/Swedish harness racing (ravit) data from the Veikkaus open REST 
 ```bash
 uv sync                                    # install deps into .venv (make install)
 uv run veikkaus fi_se                      # run the CLI: fetch FI + SE data, write data/*.json
+uv run veikkaus load data/*.json --db veikkaus_data.db  # load saved dump(s) into SQLite
 uv run python veikkaus_bot/get_data_json.py  # same as fi_se, invoked directly (used by CI)
 uv run pytest tests                        # run tests (make run-tests) — see caveat below
 uv build                                   # build sdist + wheel (make dist)
@@ -34,7 +35,7 @@ The CLI entry point is `veikkaus` (defined in `[project.scripts]` → `veikkaus_
 - `database.py` — the working one. Raw `sqlite3` with a `db_ops` context manager and `Db` class. Tables: `race`, `runner`, `start`, `stat`. `store_file()` loads a saved JSON dump; `store_data()` consumes a `VeikkausData` directly. Table column order matches the `to_json()` tuples.
 - `database2.py` — an incomplete SQLAlchemy 2.0 ORM rewrite (declarative `RunnerTable`/`StartTable`/`RaceTable`/`StatTable`). `create_db()` references undefined `CREATE_*` names and `DB_FILE` is hardcoded to an absolute path — not functional; treat as WIP unless actively completing it.
 
-**Pipeline:** `__main__.veikkaus()` (argparse, single `fi_se` subcommand) → `get_data_json.fi_se()` fetches FI then SE, each wrapped in its own try/except so one country failing doesn't block the other → JSON files in `data/`.
+**Pipeline:** `__main__.veikkaus()` (argparse) exposes two subcommands. `fi_se` → `get_data_json.fi_se()` fetches FI then SE, each wrapped in its own try/except so one country failing doesn't block the other → JSON files in `data/`. `load <jsonfile>... [--db PATH]` → `database.load()` creates the tables and loads each dump via `Db.store_file()` (per-file try/except; default DB `veikkaus_data.db`) — this is the only path that writes to SQLite.
 
 ## Automation
 

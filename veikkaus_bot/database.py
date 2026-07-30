@@ -70,7 +70,7 @@ CREATE_RACE_TABLE = """
         trackNumber INTEGER,
         PRIMARY KEY (raceId) ON CONFLICT IGNORE);
 """
-INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
+INSERT_RACE = 'INSERT INTO race VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 
 CREATE_STAT_TABLE = """
     CREATE TABLE IF NOT EXISTS stat(
@@ -151,6 +151,25 @@ class Db:
             res = list(cur.execute("SELECT runnerId FROM runner WHERE horseName='%s'" %  name))
             res2 = list(cur.execute("SELECT * FROM start WHERE runnerId='%d'" % res[0]))
         return res2
+
+
+DEFAULT_DB = 'veikkaus_data.db'
+
+
+def load(args):
+    """CLI handler: load one or more saved JSON dumps into a SQLite database.
+
+    Creates the tables if they don't exist, then loads each file. Each file
+    is wrapped so a bad dump doesn't abort the rest of the batch.
+    """
+    db = Db(getattr(args, 'db', None) or DEFAULT_DB)
+    db.create()
+    for jsonfile in args.jsonfile:
+        try:
+            db.store_file(jsonfile)
+            print(f'{jsonfile} loaded into {db.db_name}.')
+        except Exception as e:
+            print(f'{jsonfile}: {e}')
 
 
 """
