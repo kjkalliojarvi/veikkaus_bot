@@ -40,4 +40,4 @@ The CLI entry point is `veikkaus` (defined in `[project.scripts]` → `veikkaus_
 
 ## Automation
 
-`.github/workflows/fi_se_load.yml` runs daily at 21:55 UTC (and on manual dispatch): `uv sync --frozen`, `mkdir data`, run `get_data_json.py`, upload `data/` as a build artifact. No database step in CI — it only captures the JSON snapshots.
+`.github/workflows/fi_se_load.yml` runs daily at 21:55 UTC (and on manual dispatch): `uv sync --frozen`, `mkdir data`, run `get_data_json.py`, load the JSON dumps into `data/veikkaus_data.db` via `veikkaus load data/*.json`, then upload `data/` (JSON snapshots + the SQLite DB) as a build artifact.
