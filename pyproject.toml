@@ -21,7 +21,9 @@ dependencies = [
     "pydantic>=2.13.4",
     "requests>=2.34.2",
     "sqlalchemy>=2.0.51",
-    "python-dotenv>=1.0.1",
+    "python-dotenv>=1.2.2",
+    "beautifulsoup4>=4.15.0",
+    "lxml>=6.1.1",
 ]
 
 [project.urls]
