@@ -30,9 +30,9 @@ def veikkaus():
     parser_cards = subparser.add_parser('fi_se')
     parser_cards.set_defaults(func=fi_se)
 
-    parser_load = subparser.add_parser('load', help='Load saved JSON dump(s) into SQLite')
+    parser_load = subparser.add_parser('load', help='Load saved JSON dump(s) into DuckDB')
     parser_load.add_argument('jsonfile', nargs='+', help='Path(s) to JSON dump(s) from fi_se')
-    parser_load.add_argument('--db', default=DEFAULT_DB, help=f'SQLite database file (default: {DEFAULT_DB})')
+    parser_load.add_argument('--db', default=DEFAULT_DB, help=f'DuckDB database file (default: {DEFAULT_DB})')
     parser_load.set_defaults(func=load)
 
     #parser_card = subparser.add_parser('card', help='Ravit')

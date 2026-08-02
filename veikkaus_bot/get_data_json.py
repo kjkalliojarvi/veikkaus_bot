@@ -57,6 +57,23 @@ class Card(BaseModel):
             pools.append(Pool(**pool))
         return pools
 
+    def card_record(self) -> tuple:
+        """The meeting itself, without the live race-progress fields.
+
+        Column order must stay in sync with database.INSERT_CARD.
+        """
+        return (self.cardId,
+                self.country,
+                self.meetDate.isoformat(),
+                self.trackAbbreviation,
+                self.trackName,
+                self.trackNumber,
+                self.raceType,
+                self.firstRaceStart,
+                self.lunchRaces,
+                self.mainPerformance,
+                self.cancelled)
+
 
 class Race(BaseModel):
     raceId: int
@@ -97,10 +114,7 @@ class Race(BaseModel):
                 self.startTime,
                 self.toteResultString,
                 self.trackProfile,
-                card.country,
-                card.trackAbbreviation,
-                card.trackName,
-                card.trackNumber)
+                card.trackAbbreviation)
 
     def get_race_pools(self) -> list:
         all_pools = _get_collection(f'/race/{self.raceId}/pools')
@@ -350,11 +364,14 @@ class VeikkausData:
         print(f'{len(self.cards)} ravit, {len(self.races)} lähtöä, {len(self.runners)} hevosta, {len(self.pools)} pelipoolia haettu {self.country}.')
 
     def to_json(self):
+        card_records = []
         race_records = []
         runner_records = []
         start_records = []
         stat_records = []
         betpercentage_records = []
+        for card in self.cards:
+            card_records.append(card.card_record())
         for race in self.races:
             for card in self.cards:
                 if card.cardId == race.cardId:
@@ -365,6 +382,7 @@ class VeikkausData:
             stat_records += runner.stats_records()
             betpercentage_records += runner.betpercentages_record()
         data = {
+            'cards': card_records,
             'races': race_records,
             'runners': runner_records,
             'starts': start_records,

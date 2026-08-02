@@ -28,9 +28,9 @@ jobs:
         run: |
           uv run python veikkaus_bot/get_data_json.py
 
-      - name: Load into SQLite
+      - name: Load into DuckDB
         run: |
-          uv run veikkaus load data/*.json --db data/veikkaus_data.db
+          uv run veikkaus load data/*.json --db data/veikkaus_data.duckdb
 
       - name: Upload
         uses: actions/upload-artifact@v7
