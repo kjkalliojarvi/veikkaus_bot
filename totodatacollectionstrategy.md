@@ -107,7 +107,11 @@ this is exactly the §10 "silent schema drift" risk, in the time direction.
 
 **3. Volume is lower than estimated.** Sampled weeks show ~9 FI cards/week ≈ **470/year**, not
 600 — so a 5-year backfill is ~2,400 cards and ~24,000 races, roughly 50,000 requests without
-odds. At the 1.5 s base delay used by the crawler that is ~20 hours, still "about a day".
+odds. At the 2 s base delay used by the crawler that is ~28 hours. Crawl it off-peak:
+Finnish racing runs roughly 12:00-22:00 local, so the small hours put the load where the
+API is not already serving live betting traffic. The endpoints sit behind a CDN with a
+10-second cache, which a single-pass crawl misses on every request, so the pace is the only
+thing limiting what the origin carries.
 
 Also confirmed: `country == "FI"` is the right filter (a single day's cards span FI/SE/NO/FR/CA/AU),
 and km times use the notation `24,9a` — leading minute dropped, trailing letters carrying

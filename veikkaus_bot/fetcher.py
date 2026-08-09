@@ -23,7 +23,10 @@ HEADERS = {'Accept': 'application/json',
            'X-ESA-API-Key': 'ROBOT',
            'User-Agent': f'veikkaus_bot/0.1 (personal research; {CONTACT})'}
 
-DEFAULT_DELAY = 1.5          # base seconds between requests, before jitter
+# 2 s base (0.5 req/s before jitter). The endpoints sit behind CloudFront with
+# max-age=10, so a single-pass backfill misses the edge cache on every request
+# and reaches origin — the pace is the only thing limiting what they carry.
+DEFAULT_DELAY = 2.0          # base seconds between requests, before jitter
 JITTER = 0.3                 # +- 30 %
 BACKOFF = (30, 120, 600)     # 30 s -> 2 min -> 10 min on 429/5xx/timeout
 MAX_CONSECUTIVE_FAILURES = 5
