@@ -264,8 +264,11 @@ Trust but verify, per phase. After backfill, run structural checks: every card h
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 
 One §5 addition made during Phase 1: `archive.prev_start` holds the per-horse career lines
-lifted out of `runner.prevStarts`, keyed on the API's globally-unique `priorStartId` so that a
-start re-reported on every later race of that horse collapses onto one row. It is the only
+lifted out of `runner.prevStarts`, keyed on (horse, meet date, race number) so that a start
+re-reported on every later race of that horse collapses onto one row. Note that the API's
+`priorStartId` is *not* an identity for a start — a horse's whole career line is renumbered on
+every report — so it cannot serve as the key. Race number is part of it because heats and
+finals put a horse in two races on one card. It is the only
 table carrying a finishing position for the whole field, which makes it the backbone of the
 past-performance history — `archive.start` describes the race, `archive.prev_start` describes
 the careers.

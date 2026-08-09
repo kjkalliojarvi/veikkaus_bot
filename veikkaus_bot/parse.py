@@ -222,8 +222,11 @@ def betpercentage_records(runner: Runner) -> list[tuple]:
 def prevstart_records(runner: Runner) -> list[tuple]:
     """A horse's earlier starts, one record each. Empty for historical runners.
 
-    Attached to the horse rather than to the runner reporting them, so the
-    same start re-reported on every later race collapses onto one row.
+    Attached to the horse rather than to the runner reporting them, and
+    identified by (horse, meet date, race number) so that the same start
+    collapses onto one row however many later races re-report it. Entries
+    missing any of those three cannot be placed in a career and are skipped —
+    the caller reports the count.
 
     `startInterval` and `coachName` are left NULL here and filled in over the
     whole table once loading finishes — see archive_db.RECOMPUTE_START_INTERVAL
@@ -235,10 +238,13 @@ def prevstart_records(runner: Runner) -> list[tuple]:
     key = horse_key(runner.horseName, birth_year(runner))
     records = []
     for start in runner.prevStarts:
+        meet_date = parse_meet_date(start.shortMeetDate)
+        if meet_date is None or start.raceNumber is None:
+            continue
         km_time_ms, auto_start = parse_km_time(start.kmTime)
         records.append((start.priorStartId,
                         key,
-                        parse_meet_date(start.shortMeetDate),
+                        meet_date,
                         start.meetDate,
                         start.trackCode,
                         start.trackName,
@@ -392,10 +398,15 @@ def _parse_races(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
 
 def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
                    results: dict, odds: dict) -> tuple[int, int]:
-    """Returns (starts, prev-start records seen — before deduplication)."""
+    """Returns (starts, prev-start records seen — before deduplication).
+
+    The prev-start count is reports, not rows: the same start comes back on
+    every later race of that horse, and they collapse onto one row.
+    """
     horses, starts, stats, betpercentages, prevstarts = [], [], [], [], []
     count = 0
     prevstart_count = 0
+    unplaceable = 0
     for task, payload in _each_payload(manifest, raw_root, 'runners'):
         for raw in payload.get('collection', []):
             try:
@@ -411,6 +422,7 @@ def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
             runner_prevstarts = prevstart_records(runner)
             prevstarts += runner_prevstarts
             prevstart_count += len(runner_prevstarts)
+            unplaceable += len(runner.prevStarts) - len(runner_prevstarts)
             count += 1
         _flush(db.store_horses, horses)
         _flush(db.store_starts, starts)
@@ -422,6 +434,8 @@ def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
     _flush(db.store_stats, stats, force=True)
     _flush(db.store_betpercentages, betpercentages, force=True)
     _flush(db.store_prevstarts, prevstarts, force=True)
+    if unplaceable:
+        print(f'{unplaceable} prev-start entries skipped: no meet date or race number.')
     return count, prevstart_count
 
 

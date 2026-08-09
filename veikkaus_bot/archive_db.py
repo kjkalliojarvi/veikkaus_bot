@@ -161,9 +161,17 @@ BETPERCENTAGE_KEY = (0, 1)  # runnerId, poolType
 # A horse's earlier starts, as reported inside a runners payload. This is the
 # only source in the API that carries the *whole* field's finishing detail
 # (`archive.start` stops at the paid places), so it is the backbone of the
-# past-performance history. Keyed on priorStartId, which is globally unique, so
-# the same start re-reported on every later race of that horse collapses to one
-# row instead of one per reporting runner.
+# past-performance history.
+#
+# Keyed on (horseKey, meetDate, raceNumber) — the natural identity of a start —
+# and emphatically *not* on priorStartId. That id is assigned per reporting
+# payload, not per start: when a horse races again, its whole prevStarts list
+# comes back renumbered, one contiguous block of new ids (observed as a
+# constant offset between two reports of the same career). Keying on it would
+# store one row per (start x every later race of that horse), which over a
+# multi-year crawl is the same history duplicated many times over, and would
+# feed `startInterval` a stream of zero-day gaps between the copies.
+# priorStartId is kept as informational — whatever the latest report called it.
 CREATE_PREVSTART_TABLE = """
     CREATE TABLE IF NOT EXISTS archive.prev_start(
         priorStartId BIGINT,
@@ -196,12 +204,12 @@ CREATE_PREVSTART_TABLE = """
         resultsAvailable BOOLEAN,
         startInterval BIGINT,    -- days since the horse's previous known start
         coachName TEXT,          -- trainer at *this* start, from archive.start
-        PRIMARY KEY (priorStartId));
+        PRIMARY KEY (horseKey, meetDate, raceNumber));
 """
 INSERT_PREVSTART = ('INSERT OR REPLACE INTO archive.prev_start VALUES '
                     '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
                     '?, ?, ?, ?, ?, ?, ?);')
-PREVSTART_KEY = (0,)  # priorStartId
+PREVSTART_KEY = (1, 2, 6)  # horseKey, meetDate, raceNumber
 
 # The prev-start block names a driver but never a trainer, so the trainer at
 # the time of a past start has to come from the archive itself: the crawled
@@ -243,22 +251,22 @@ RECOMPUTE_PREV_START_COACH = """
 RECOMPUTE_START_INTERVAL = """
     UPDATE archive.prev_start AS p
     SET startInterval = g.gap
-    FROM (SELECT priorStartId,
+    FROM (SELECT horseKey, meetDate, raceNumber,
                  coalesce(
                      date_diff('day',
                                lag(CAST(meetDate AS DATE)) OVER (PARTITION BY horseKey
-                                                                 ORDER BY meetDate, priorStartId),
+                                                                 ORDER BY meetDate, raceNumber),
                                CAST(meetDate AS DATE)),
                      date_diff('day', DATE '1970-01-01', CAST(meetDate AS DATE))) AS gap
-          FROM archive.prev_start
-          WHERE meetDate IS NOT NULL) AS g
-    WHERE g.priorStartId = p.priorStartId;
+          FROM archive.prev_start) AS g
+    WHERE g.horseKey = p.horseKey
+      AND g.meetDate = p.meetDate
+      AND g.raceNumber = p.raceNumber;
 """
 
 CREATE_INDEXES = (
     'CREATE INDEX IF NOT EXISTS idx_start_horse ON archive.start(horseKey);',
     'CREATE INDEX IF NOT EXISTS idx_race_card ON archive.race(cardId);',
-    'CREATE INDEX IF NOT EXISTS idx_prevstart_horse ON archive.prev_start(horseKey);',
 )
 
 
