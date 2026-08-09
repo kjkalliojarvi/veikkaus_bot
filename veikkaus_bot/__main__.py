@@ -3,8 +3,12 @@ import datetime
 import signal
 import sys
 
-from .get_data_json import fi_se
-from .database import load, DEFAULT_DB
+from .archive_db import DEFAULT_DB
+from .crawler import backfill, status
+from .fetcher import DEFAULT_DELAY
+from .parse import parse
+
+DEFAULT_RAW = 'data/raw'
 
 PACKAGE_NAME = 'veikkaus_bot'
 PVM = datetime.datetime.now().strftime("%d%m%Y")
@@ -27,13 +31,40 @@ def veikkaus():
 
     subparser = parser.add_subparsers(title='Commands', dest='command')
 
-    parser_cards = subparser.add_parser('fi_se')
-    parser_cards.set_defaults(func=fi_se)
+    parser_backfill = subparser.add_parser(
+        'backfill', help='Crawl the race calendar into the raw archive (resumable)')
+    parser_backfill.add_argument('--from', dest='start', required=True,
+                                 help='First meet date to crawl (yyyy-mm-dd)')
+    parser_backfill.add_argument('--to', dest='end', default=None,
+                                 help='Last meet date to crawl (yyyy-mm-dd, default: today)')
+    parser_backfill.add_argument('--country', default='FI', help='Card country filter (default: FI)')
+    parser_backfill.add_argument('--raw', default=DEFAULT_RAW,
+                                 help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_backfill.add_argument('--db', default=DEFAULT_DB,
+                                 help=f'DuckDB database holding the manifest (default: {DEFAULT_DB})')
+    parser_backfill.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                                 help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    parser_backfill.add_argument('--odds', action='store_true',
+                                 help='Also crawl win-pool odds (roughly doubles the request count)')
+    parser_backfill.add_argument('--limit', type=int, default=None,
+                                 help='Stop after N fetches (for a trial run)')
+    parser_backfill.add_argument('--retry-failed', action='store_true',
+                                 help='Reset failed manifest rows to pending before crawling')
+    parser_backfill.set_defaults(func=backfill)
 
-    parser_load = subparser.add_parser('load', help='Load saved JSON dump(s) into DuckDB')
-    parser_load.add_argument('jsonfile', nargs='+', help='Path(s) to JSON dump(s) from fi_se')
-    parser_load.add_argument('--db', default=DEFAULT_DB, help=f'DuckDB database file (default: {DEFAULT_DB})')
-    parser_load.set_defaults(func=load)
+    parser_parse = subparser.add_parser(
+        'parse', help='Parse the raw archive into the archive.* tables')
+    parser_parse.add_argument('--raw', default=DEFAULT_RAW,
+                              help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_parse.add_argument('--db', default=DEFAULT_DB,
+                              help=f'DuckDB database file (default: {DEFAULT_DB})')
+    parser_parse.add_argument('--country', default='FI', help='Card country filter (default: FI)')
+    parser_parse.set_defaults(func=parse)
+
+    parser_status = subparser.add_parser('status', help='Show crawl manifest progress')
+    parser_status.add_argument('--db', default=DEFAULT_DB,
+                               help=f'DuckDB database file (default: {DEFAULT_DB})')
+    parser_status.set_defaults(func=status)
 
     #parser_card = subparser.add_parser('card', help='Ravit')
     #parser_card.add_argument('-n', '--name', help='Radan nimi')
