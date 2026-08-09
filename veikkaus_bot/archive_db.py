@@ -223,6 +223,43 @@ PREVSTART_KEY = (1, 2, 6)  # horseKey, meetDate, raceNumber
 # the join: `prev_start.trackCode` and `card.trackAbbreviation` are not verified
 # to share a vocabulary at every track, and a horse cannot be in two places on
 # one day anyway.
+# Start type is a property of the race, not of a horse's performance, so it is
+# known for every runner — including the scratched ones and everyone outside
+# the paid places. Deriving it only from the `a` suffix on a km time (which is
+# all the runners payload offers per horse) left it NULL wherever no time was
+# recorded, which was most of the table. Where both sources exist they agree
+# exactly, so the race wins and the suffix becomes a cross-check.
+# Only CAR_START and VOLT_START have ever been observed; anything else is left
+# NULL rather than silently called a volt start.
+RECOMPUTE_START_AUTOSTART = """
+    UPDATE archive.start AS s
+    SET autoStart = (r.startType = 'CAR_START')
+    FROM archive.race AS r
+    WHERE r.raceId = s.raceId
+      AND r.startType IN ('CAR_START', 'VOLT_START');
+"""
+
+# The prev-start block has a raceStartType field, but the API sends UNKNOWN in
+# every entry ever observed, so the km-time suffix is the only per-row signal
+# there. Where the crawl has covered the race itself, fill the gaps the suffix
+# cannot reach — a start with no recorded time still had a start type. Existing
+# values are left alone; the two sources agree, and the suffix is per-horse.
+RECOMPUTE_PREV_START_AUTOSTART = """
+    UPDATE archive.prev_start AS p
+    SET autoStart = t.autoStart
+    FROM (SELECT s.horseKey, ca.meetDate, r.number AS raceNumber,
+                 min(CAST(r.startType = 'CAR_START' AS TINYINT)) = 1 AS autoStart
+          FROM archive.start s
+          JOIN archive.race r ON r.raceId = s.raceId
+          JOIN archive.card ca ON ca.cardId = r.cardId
+          WHERE r.startType IN ('CAR_START', 'VOLT_START')
+          GROUP BY 1, 2, 3) AS t
+    WHERE t.horseKey = p.horseKey
+      AND t.meetDate = p.meetDate
+      AND t.raceNumber = p.raceNumber
+      AND p.autoStart IS NULL;
+"""
+
 RECOMPUTE_PREV_START_COACH = """
     UPDATE archive.prev_start AS p
     SET coachName = c.coachName
@@ -342,6 +379,10 @@ class ArchiveDb:
 
     def recompute_prev_start_coaches(self):
         self.conn.execute(RECOMPUTE_PREV_START_COACH)
+
+    def recompute_auto_starts(self):
+        self.conn.execute(RECOMPUTE_START_AUTOSTART)
+        self.conn.execute(RECOMPUTE_PREV_START_AUTOSTART)
 
 
 def query_horse(db_name: str, name: str, before: str | None = None):

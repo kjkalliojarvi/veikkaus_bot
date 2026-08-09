@@ -176,6 +176,9 @@ def start_record(runner: Runner, result: dict | None, win_odds: int | None) -> t
             result.get('placement'),
             km_time,
             km_time_ms,
+            # Provisional: the km-time suffix only speaks for horses that
+            # recorded a time. recompute_auto_starts() then sets this from
+            # race.startType, which covers every runner.
             auto_start if km_time_ms else None,
             win_odds if win_odds is not None else result.get('winOdds'))
 
@@ -453,6 +456,7 @@ def parse_all(db_name: str, raw_root: str, country: str) -> dict:
         starts, prevstarts = _parse_runners(manifest, raw_root, db, results, odds)
         db.recompute_start_intervals()
         db.recompute_prev_start_coaches()
+        db.recompute_auto_starts()
         counts = {'cards': cards, 'races': races, 'starts': starts,
                   'prev-starts': prevstarts}
     return counts

@@ -16,15 +16,16 @@ def prevstart(prior_start_id, horse_key, meet_date, race_number=1):
     return tuple(row)
 
 
-def start(race_id, start_number, horse_key, coach_name):
+def start(race_id, start_number, horse_key, coach_name, auto_start=None):
     row = [None] * START_COLUMNS
     row[0], row[1], row[3], row[6] = race_id, start_number, horse_key, coach_name
+    row[20] = auto_start
     return tuple(row)
 
 
-def race(race_id, card_id, number):
+def race(race_id, card_id, number, start_type=None):
     row = [None] * 15
-    row[0], row[1], row[2] = race_id, card_id, number
+    row[0], row[1], row[2], row[5] = race_id, card_id, number, start_type
     return tuple(row)
 
 
@@ -176,3 +177,52 @@ def test_prev_start_coach_does_not_leak_between_horses(db):
     db.store_prevstarts([prevstart(1, 'b|2020', '2026-06-01', race_number=3)])
     db.recompute_prev_start_coaches()
     assert coaches(db)['2026-06-01'] is None
+
+
+def test_auto_start_is_set_for_every_runner_not_just_those_with_a_km_time(db):
+    """Start type belongs to the race, so a scratched horse or one outside the
+    paid places has one too — even with no km time to read a suffix from."""
+    db.store_races([race(10, 1, 3, start_type='CAR_START')])
+    db.store_starts([start(10, 1, 'a|2019', None, auto_start=True),   # had a km time
+                     start(10, 2, 'b|2019', None, auto_start=None)])  # did not
+    db.recompute_auto_starts()
+    assert db.conn.execute(
+        'SELECT count(*) FROM archive.start WHERE autoStart IS NULL').fetchone()[0] == 0
+    assert db.conn.execute(
+        'SELECT DISTINCT autoStart FROM archive.start').fetchall() == [(True,)]
+
+
+def test_volt_start_races_are_not_auto(db):
+    db.store_races([race(20, 1, 4, start_type='VOLT_START')])
+    db.store_starts([start(20, 1, 'a|2019', None)])
+    db.recompute_auto_starts()
+    assert db.conn.execute('SELECT autoStart FROM archive.start').fetchone()[0] is False
+
+
+def test_an_unrecognised_start_type_stays_null_rather_than_guessing(db):
+    db.store_races([race(30, 1, 5, start_type='UNKNOWN')])
+    db.store_starts([start(30, 1, 'a|2019', None)])
+    db.recompute_auto_starts()
+    assert db.conn.execute('SELECT autoStart FROM archive.start').fetchone()[0] is None
+
+
+def test_prev_start_auto_start_is_filled_from_a_crawled_race(db):
+    """The prev-start block always sends raceStartType=UNKNOWN, so a start with
+    no recorded time can only get its type from the crawled race."""
+    db.store_cards([card(1, '2026-06-01')])
+    db.store_races([race(10, 1, 3, start_type='CAR_START')])
+    db.store_starts([start(10, 1, 'h|2019', None)])
+    db.store_prevstarts([prevstart(1, 'h|2019', '2026-06-01', race_number=3)])
+    db.recompute_auto_starts()
+    assert db.conn.execute('SELECT autoStart FROM archive.prev_start').fetchone()[0] is True
+
+
+def test_prev_start_auto_start_from_the_km_suffix_is_not_overwritten(db):
+    db.store_cards([card(1, '2026-06-01')])
+    db.store_races([race(10, 1, 3, start_type='CAR_START')])
+    db.store_starts([start(10, 1, 'h|2019', None)])
+    row = list(prevstart(1, 'h|2019', '2026-06-01', race_number=3))
+    row[16] = False                       # autoStart already read off the km time
+    db.store_prevstarts([tuple(row)])
+    db.recompute_auto_starts()
+    assert db.conn.execute('SELECT autoStart FROM archive.prev_start').fetchone()[0] is False
