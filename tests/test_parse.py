@@ -1,9 +1,9 @@
 import pytest
 
 from veikkaus_bot.models import Runner
-from veikkaus_bot.parse import (betpercentage_records, horse_key, normalize_name,
-                                parse_km_time, parse_meet_date, parse_result,
-                                parse_tote_result, parse_win_odd,
+from veikkaus_bot.parse import (_captured_at, betpercentage_records, horse_key,
+                                normalize_name, parse_km_time, parse_meet_date,
+                                parse_result, parse_tote_result, parse_win_odd,
                                 prevstart_records, stat_records)
 
 
@@ -169,3 +169,21 @@ def test_prevstart_records_parse_a_finished_start():
 
 def test_prevstart_records_empty_for_historical_runners():
     assert prevstart_records(make_runner()) == []
+
+
+def test_captured_at_prefers_the_payloads_own_timestamp():
+    assert _captured_at({'updated': 1623770218000}, 1623769620000) == 1623770218000
+
+
+def test_captured_at_falls_back_to_the_race_start_time():
+    """Old payloads drop `updated` and `updatedString` together, but capturedAt
+    is in the primary key and cannot be NULL."""
+    assert _captured_at({'poolId': 153443, 'odds': []}, 1118826000000) == 1118826000000
+
+
+def test_captured_at_uses_an_explicit_sentinel_when_nothing_is_known():
+    assert _captured_at({'poolId': 153443}, None) == 0
+
+
+def test_captured_at_treats_an_explicit_null_like_a_missing_field():
+    assert _captured_at({'updated': None}, 1118826000000) == 1118826000000

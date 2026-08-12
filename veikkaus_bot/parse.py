@@ -334,34 +334,62 @@ def _results_map(manifest: Manifest, raw_root: str) -> dict:
     return out
 
 
+UNKNOWN_CAPTURE_TIME = 0
+
+
+def _captured_at(payload: dict, pool_start_time: int | None) -> int:
+    """When an odds payload was published.
+
+    `capturedAt` is what separates two snapshots of the same pool and runner,
+    so it is part of the primary key and cannot be NULL. Old payloads drop
+    `updated` (and `updatedString` with it) — seen on 2005 cards — so fall back
+    to the pool's own race start time, which dates the snapshot closely enough
+    for a backfill, where there is exactly one fetch per pool anyway. Failing
+    that, an explicit epoch sentinel: unknown, but still addressable, and not a
+    silently plausible timestamp.
+    """
+    updated = payload.get('updated')
+    if updated is not None:
+        return updated
+    if pool_start_time is not None:
+        return pool_start_time
+    return UNKNOWN_CAPTURE_TIME
+
+
 def _odds_map(manifest: Manifest, raw_root: str, db: ArchiveDb) -> dict:
     """Store odds snapshots and return (raceId, startNumber) -> final win odds.
 
     Only present when the crawl ran with --odds; otherwise the win odds in
     `archive.start` come from the paid places in the results payload.
     """
-    pool_race = {}
+    pool_race, pool_time = {}, {}
     for task, payload in _each_payload(manifest, raw_root, 'pools'):
         for pool in payload.get('collection', []):
             pool_race[pool['poolId']] = int(task.entityId)
+            pool_time[pool['poolId']] = pool.get('firstRaceStartTime')
 
     out: dict[tuple[int, int], int] = {}
     rows = []
     for _, payload in _each_payload(manifest, raw_root, 'odds'):
-        race_id = pool_race.get(payload.get('poolId'))
+        pool_id = payload.get('poolId')
+        race_id = pool_race.get(pool_id)
         if race_id is None:
             continue
+        captured_at = _captured_at(payload, pool_time.get(pool_id))
         for odd in payload.get('odds', []):
-            rows.append((payload['poolId'],
+            start_number = odd.get('runnerNumber')
+            if start_number is None:
+                continue
+            rows.append((pool_id,
                          race_id,
-                         odd['runnerNumber'],
-                         payload.get('updated'),
+                         start_number,
+                         captured_at,
                          payload.get('poolType'),
                          odd.get('probable'),
                          odd.get('amount'),
                          bool(odd.get('scratched', False))))
             if odd.get('probable') is not None:
-                out[(race_id, odd['runnerNumber'])] = odd['probable']
+                out[(race_id, start_number)] = odd['probable']
         _flush(db.store_odds, rows)
     _flush(db.store_odds, rows, force=True)
     return out
