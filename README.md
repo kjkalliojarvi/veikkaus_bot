@@ -16,9 +16,9 @@ uv sync
 ## Usage
 
 ```bash
-uv run veikkaus backfill --from 2021-01-01 --db data/veikkaus_data.duckdb  # crawl into data/raw/
-uv run veikkaus status  --db data/veikkaus_data.duckdb                     # how far it got
-uv run veikkaus parse   --db data/veikkaus_data.duckdb                     # raw/ -> archive.* tables
+uv run veikkaus backfill --from 2021-01-01  # crawl into data/raw/
+uv run veikkaus status                      # how far it got
+uv run veikkaus parse                       # raw/ -> archive.* tables
 ```
 
 Fetching and parsing are deliberately separate. `backfill` only writes gzipped raw responses into `data/raw/` and records every fetch in a manifest table, so it is resumable — kill it and rerun the same command. It crawls newest date first, one request at a time with a ≥1 s delay and exponential backoff. `parse` then reads the raw archive into the `archive.*` tables and can be re-run at any time without re-crawling.
@@ -33,7 +33,7 @@ A five-year backfill is on the order of 50,000 requests — about 28 hours at th
 
 ```bash
 # 02:00–06:00 Finnish time, resuming wherever the last run stopped
-uv run veikkaus backfill --from 2021-01-01 --db data/veikkaus_data.duckdb --limit 7000
+uv run veikkaus backfill --from 2021-01-01 --limit 7000
 ```
 
 The crawl is resumable, so `--limit` splits a multi-day backfill across successive nights — rerun the same command and it picks up from the manifest. Two other levers reduce the footprint more than a slower delay does: omitting `--odds` roughly halves the request count, and narrowing the date window cuts it proportionally.

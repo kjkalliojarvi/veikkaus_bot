@@ -9,12 +9,16 @@ every id and epoch-millisecond value is `BIGINT` (`INTEGER` is 32-bit and
 `INSERT OR REPLACE` — the SQLite `ON CONFLICT` clause inside a `PRIMARY KEY`
 definition is not supported.
 """
+import os
 from contextlib import contextmanager
 
 import duckdb
 
 
-DEFAULT_DB = 'veikkaus_data.duckdb'
+# Alongside the raw zone (`data/raw`), so that both halves of the pipeline
+# default into `data/` and a bare `parse` finds the manifest a bare `backfill`
+# wrote.
+DEFAULT_DB = 'data/veikkaus_data.duckdb'
 
 CREATE_SCHEMA = 'CREATE SCHEMA IF NOT EXISTS archive;'
 
@@ -309,6 +313,9 @@ CREATE_INDEXES = (
 
 @contextmanager
 def db_ops(db_name):
+    # DuckDB will not create a missing parent directory, and the default path
+    # is under data/, which a fresh clone does not have.
+    os.makedirs(os.path.dirname(db_name) or '.', exist_ok=True)
     conn = duckdb.connect(db_name)
     try:
         yield conn
