@@ -1,6 +1,6 @@
 # veikkaus_bot
 
-Fetches Finnish and Swedish harness racing (ravit) data from the [Veikkaus](https://www.veikkaus.fi) open Toto REST API and saves it as JSON (with optional DuckDB storage).
+Builds a past-performance dataset of Finnish harness racing (ravit) from the [Veikkaus](https://www.veikkaus.fi) open Toto REST API, by crawling the race calendar into a raw JSON archive and parsing that into DuckDB. The approach and its constraints are set out in [totodatacollectionstrategy.md](totodatacollectionstrategy.md).
 
 ## Requirements
 
@@ -16,21 +16,57 @@ uv sync
 ## Usage
 
 ```bash
-mkdir -p data                                          # output directory must exist
-uv run veikkaus fi_se                                  # fetch today's FI + SE cards, write data/YYYY-M-D-<country>.json
-uv run veikkaus load data/*.json --db veikkaus_data.duckdb # load saved dump(s) into DuckDB
+uv run veikkaus backfill --from 2021-01-01  # crawl into data/raw/
+uv run veikkaus status                      # how far it got
+uv run veikkaus parse                       # raw/ -> archive.* tables
 ```
 
-The `fi_se` command walks the full `Card → Race → Runner` tree from the API for each country and writes one JSON file per country into `data/`. FI and SE are fetched independently, so a failure in one does not stop the other.
+Fetching and parsing are deliberately separate. `backfill` only writes gzipped raw responses into `data/raw/` and records every fetch in a manifest table, so it is resumable — kill it and rerun the same command. It crawls newest date first, one request at a time with a ≥1 s delay and exponential backoff. `parse` then reads the raw archive into the `archive.*` tables and can be re-run at any time without re-crawling.
 
-The `load` command creates the tables (if needed) and loads one or more saved JSON dumps into a DuckDB database (default `veikkaus_data.duckdb`). Each file is loaded independently, so a bad dump does not abort the batch.
+`--odds` additionally crawls win-pool odds for every race (roughly doubles the request count); without it, final win odds are only known for the paid places.
+
+A five-year backfill is on the order of 50,000 requests — about 28 hours at the default 2 s delay. Note that veikkaus.fi's `robots.txt` disallows automated fetching of these paths: keep the crawl slow and single-threaded, and set `VEIKKAUS_CONTACT` to a contact address so the `User-Agent` identifies you. If this becomes more than personal research, ask Veikkaus or Suomen Hippos for sanctioned access.
+
+### Crawl off-peak
+
+**When you crawl matters more than how fast.** Finnish racing runs roughly 12:00–22:00 local time, and during those hours the API is serving live betting traffic and odds updates. Crawling in the small hours puts the load where their capacity is idle:
+
+```bash
+# 02:00–06:00 Finnish time, resuming wherever the last run stopped
+uv run veikkaus backfill --from 2021-01-01 --limit 7000
+```
+
+The crawl is resumable, so `--limit` splits a multi-day backfill across successive nights — rerun the same command and it picks up from the manifest. Two other levers reduce the footprint more than a slower delay does: omitting `--odds` roughly halves the request count, and narrowing the date window cuts it proportionally.
+
+The endpoints sit behind a CDN with a 10-second cache, so a single-pass crawl misses the edge on every request and reaches origin — the delay is the only thing limiting what they carry.
+
+## Data
+
+Everything lands in the `archive` schema of a DuckDB file:
+
+| Table | One row per |
+|---|---|
+| `card` | race day at a track |
+| `race` | race |
+| `horse` | horse, keyed by normalised name + birth year |
+| `start` | (race, horse) — the race as entered and as it paid out |
+| `prev_start` | earlier start of a horse — the past-performance history, incl. `startInterval` (days since the horse's previous start) and `coachName` (back-filled from the archived race) |
+| `stat` | (runner, period) — career/season form, current cards only |
+| `bet_percentage` | (runner, pool type) |
+| `odds_snapshot` | (pool, runner, capture time) |
+| `manifest` | planned fetch — the crawl ledger |
+
+`start` and `prev_start` come from the same payload but answer different questions. The results endpoint publishes finishing detail only for the first three home, so `start.placement` and `start.kmTime` are NULL for the rest of the field. `prev_start` — each horse's own career line, riding along inside the runners payload — has no such cap: it carries a finishing position for the whole field (observed to 16th) plus the Finnish outcome codes for qualifying, retired and disqualified starts. Crawling the calendar therefore reconstructs full finishing orders retrospectively, for every horse that started again. See §2b of the strategy document.
+
+Both `stat` and `prev_start` ride along only while a card is current, so they stay empty for backfilled years and accumulate from crawling recent dates.
 
 ## How it works
 
-- `veikkaus_bot/get_data_json.py` — Pydantic models for the API resources (`Card`, `Race`, `Runner`, `Pool`, ...), the `VeikkausData` aggregator that fetches and flattens the data, and the `fi_se` entry point. Each runner also carries its statistics (`currentYear`/`previousYear`/`total`) and bet percentages (per pool type), which are collected alongside the race, runner, and previous-start records.
-- `veikkaus_bot/database.py` — DuckDB storage (`Db`) for loading the saved JSON dumps into `card`, `race`, `runner`, `start`, `stat`, and `bet_percentage` tables.
-
-Data is refreshed automatically each day by the `fi-se data load` GitHub Actions workflow (`.github/workflows/fi_se_load.yml`), which runs the fetch, loads the JSON dumps into `data/veikkaus_data.duckdb`, and uploads the resulting `data/` directory (JSON snapshots + the DuckDB database) as a build artifact.
+- `veikkaus_bot/models.py` — Pydantic models for the API resources (`Card`, `Race`, `Runner`, `Stat`).
+- `veikkaus_bot/fetcher.py` — polite HTTP client (delay + jitter, backoff, circuit breaker) and the gzipped raw archive.
+- `veikkaus_bot/crawler.py` — the resumable fetch ledger (`archive.manifest`) and the backfill driver.
+- `veikkaus_bot/archive_db.py` — the `archive.*` schema and its upserts.
+- `veikkaus_bot/parse.py` — raw archive → `archive.*`, including Finnish km-time and horse-identity parsing.
 
 ## Development
 

@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+  <xs:element name="cards">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element maxOccurs="unbounded" ref="card"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="card">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="races"/>
+      </xs:sequence>
+      <xs:attribute name="code" use="required" type="xs:NCName">
+      	<xs:annotation>
+      		<xs:documentation>Track abbreviation.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="date" use="required" type="xs:NMTOKEN">
+      	<xs:annotation>
+      		<xs:documentation>Meet date.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="name" use="required" type="xs:NCName">
+      	<xs:annotation>
+      		<xs:documentation>Track name.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="track-code" use="required" type="xs:integer">
+      	<xs:annotation>
+      		<xs:documentation>Track code.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="race-type" use="required">
+      	<xs:annotation>
+      		<xs:documentation>Race type.</xs:documentation>
+      	</xs:annotation>
+      	<xs:simpleType>
+      		<xs:restriction base="xs:NCName">
+      			<xs:enumeration value="ravi"></xs:enumeration>
+      			<xs:enumeration value="laukka"></xs:enumeration>
+      			<xs:enumeration value="ratsastus"></xs:enumeration>
+      		</xs:restriction>
+      	</xs:simpleType>
+      </xs:attribute>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="races">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element maxOccurs="unbounded" ref="race"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="race">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element minOccurs="0" ref="runners">
+        	<xs:annotation>
+        		<xs:documentation></xs:documentation>
+        	</xs:annotation></xs:element>
+        <xs:element ref="pools"/>
+      </xs:sequence>
+      <xs:attribute name="number" use="required" type="xs:integer"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="runners">
+    <xs:complexType>
+            <xs:annotation>
+            	<xs:documentation>Number of horses at Start of the day.</xs:documentation>
+            </xs:annotation>
+            <xs:simpleContent>
+        <xs:extension base="xs:integer">
+          <xs:attribute name="scratched">
+          	<xs:annotation>
+          		<xs:documentation>List of horses scratched from the race.</xs:documentation></xs:annotation></xs:attribute>
+        </xs:extension>
+      </xs:simpleContent>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="pools">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element maxOccurs="unbounded" ref="pool"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="pool">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element minOccurs="0" ref="probables"/>
+        <xs:element minOccurs="0" ref="files"/>
+      </xs:sequence>
+      <xs:attribute name="file" type="xs:NMTOKEN">
+      	<xs:annotation>
+      		<xs:documentation>Name of the file which holds pool's odds.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="net-pool">
+      	<xs:annotation>
+      		<xs:documentation>Net pool.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="net-sales">
+      	<xs:annotation>
+      		<xs:documentation>Net sales.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="type" use="required">
+      	<xs:annotation>
+      		<xs:documentation>Pool code.</xs:documentation>
+      	</xs:annotation>
+      	<xs:simpleType>
+      		<xs:restriction base="xs:NMTOKEN">
+      			<xs:enumeration value="VOI"></xs:enumeration>
+      			<xs:enumeration value="SIJ"></xs:enumeration>
+      			<xs:enumeration value="KAK"></xs:enumeration>
+      			<xs:enumeration value="DUO"></xs:enumeration>
+      			<xs:enumeration value="TRO"></xs:enumeration>
+      			<xs:enumeration value="4VE"></xs:enumeration>
+      			<xs:enumeration value="T4"></xs:enumeration>
+      			<xs:enumeration value="T5"></xs:enumeration>
+      			<xs:enumeration value="T64"></xs:enumeration>
+      			<xs:enumeration value="T65"></xs:enumeration>
+      			<xs:enumeration value="T75"></xs:enumeration>
+      		</xs:restriction>
+      	</xs:simpleType>
+      </xs:attribute>
+      <xs:attribute name="update-time" type="xs:NMTOKEN">
+      	<xs:annotation>
+      		<xs:documentation>Update time.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="files">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element maxOccurs="unbounded" ref="file"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="file" type="xs:NMTOKEN">
+      	<xs:annotation>
+      		<xs:documentation>Name of the file which holds pool's odds.</xs:documentation>
+      	</xs:annotation>
+  </xs:element>
+
+  <xs:element name="probables">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element maxOccurs="unbounded" ref="probable"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="probable">
+    <xs:complexType mixed="true">
+      <xs:attribute name="amount">
+      	<xs:annotation>
+      		<xs:documentation>Amount in euros.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="combination" type="xs:NMTOKEN">
+      	<xs:annotation>
+      		<xs:documentation>Combination.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="high-probable">
+      	<xs:annotation>
+      		<xs:documentation>Maximum Odd.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="low-probable">
+      	<xs:annotation>
+      		<xs:documentation>Minimum Odd.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+      <xs:attribute name="played">
+      	<xs:annotation>
+      		<xs:documentation>Amount in euros.</xs:documentation></xs:annotation></xs:attribute>
+      <xs:attribute name="runner" type="xs:integer">
+      	<xs:annotation>
+      		<xs:documentation>Runner number.</xs:documentation>
+      	</xs:annotation></xs:attribute>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

@@ -129,6 +129,8 @@ dmypy.json
 .pyre/
 
 *.json
+*.json.gz
+data/raw/
 *.db
 *.duckdb
 *.sqbpro
