@@ -140,6 +140,19 @@ def birth_year(runner: Runner) -> int | None:
     return runner.birthDate.year if runner.birthDate else None
 
 
+def is_placeholder(runner: Runner) -> bool:
+    """True for the `Poissa` ("absent") runner the API sends for a vacated start
+    number. It is not a horse: it is always scratched, carries no `coachName` at
+    all, and its `horseAge` is arbitrary (0–24 observed across 19 of them), so
+    it would otherwise land one junk `archive.horse` row per distinct age —
+    colliding across tracks and dates — plus a start with nothing in it.
+
+    `driverName` is not part of the test: it comes back as 'Poissa', '- -',
+    'Poissa Poissa' or empty.
+    """
+    return normalize_name(runner.horseName) == 'poissa' and runner.coachName is None
+
+
 def horse_record(runner: Runner) -> tuple:
     """Column order must stay in sync with archive_db.INSERT_HORSE."""
     return (horse_key(runner.horseName, birth_year(runner)),
@@ -438,12 +451,16 @@ def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
     count = 0
     prevstart_count = 0
     unplaceable = 0
+    placeholders = 0
     for task, payload in _each_payload(manifest, raw_root, 'runners'):
         for raw in payload.get('collection', []):
             try:
                 runner = Runner(**raw)
             except Exception as e:
                 print(f'{task.rawPath}: runner {raw.get("runnerId")}: {e}')
+                continue
+            if is_placeholder(runner):
+                placeholders += 1
                 continue
             key = (runner.raceId, runner.startNumber)
             horses.append(horse_record(runner))
@@ -465,6 +482,8 @@ def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
     _flush(db.store_stats, stats, force=True)
     _flush(db.store_betpercentages, betpercentages, force=True)
     _flush(db.store_prevstarts, prevstarts, force=True)
+    if placeholders:
+        print(f'{placeholders} `Poissa` placeholder runners skipped: vacated start numbers.')
     if unplaceable:
         print(f'{unplaceable} prev-start entries skipped: no meet date or race number.')
     return count, prevstart_count

@@ -2,9 +2,9 @@ import pytest
 
 from veikkaus_bot.models import Runner
 from veikkaus_bot.parse import (_captured_at, betpercentage_records, horse_key,
-                                normalize_name, parse_km_time, parse_meet_date,
-                                parse_result, parse_tote_result, parse_win_odd,
-                                prevstart_records, stat_records)
+                                is_placeholder, normalize_name, parse_km_time,
+                                parse_meet_date, parse_result, parse_tote_result,
+                                parse_win_odd, prevstart_records, stat_records)
 
 
 def make_runner(**overrides):
@@ -169,6 +169,22 @@ def test_prevstart_records_parse_a_finished_start():
 
 def test_prevstart_records_empty_for_historical_runners():
     assert prevstart_records(make_runner()) == []
+
+
+@pytest.mark.parametrize('driver_name', ['Poissa', '- -', 'Poissa Poissa', ''])
+def test_is_placeholder_spots_a_vacated_start_number(driver_name):
+    """`driverName` varies across them, so the test cannot lean on it."""
+    runner = Runner(runnerId=1054821980, raceId=2, horseName='Poissa',
+                    startNumber=11, scratched=True, prize=0, horseAge=16,
+                    gender='UNKNOWN', coachNameInitials='', ownerName='',
+                    specialCart='UNKNOWN', driverName=driver_name)
+    assert is_placeholder(runner)
+
+
+def test_is_placeholder_leaves_real_runners_alone():
+    """A real runner always names a trainer, however thin the payload."""
+    assert not is_placeholder(make_runner())
+    assert not is_placeholder(make_runner(scratched=True))
 
 
 def test_captured_at_prefers_the_payloads_own_timestamp():

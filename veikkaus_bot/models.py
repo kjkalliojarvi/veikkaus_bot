@@ -21,51 +21,53 @@ URL = 'https://www.veikkaus.fi/api/toto-info/v1'
 # Cards fetched by date omit the live-progress and EPG blocks that today's
 # cards always carry, and before roughly 2010 they omit the start times too.
 class Card(BaseModel):
-    cancelled: bool
     cardId: int
-    country: str
-    currentRaceNumber: int
+    meetDate: date
+    cancelled: Optional[bool] = None
+    country: Optional[str] = None
+    currentRaceNumber: Optional[int] = None
     currentRaceStatus: Optional[str] = None
     currentRaceStartTime: Optional[int] = None
     firstRaceStart: Optional[int] = None
-    future: bool
+    future: Optional[bool] = None
     lastRaceOfficial: Optional[int] = None
-    lunchRaces: bool
-    meetDate: date
+    lunchRaces: Optional[bool] = None
     minutesToPost: Optional[int] = None
-    priority: int
-    raceType: str
-    trackAbbreviation: str
-    trackName: str
-    trackNumber: int
-    mainPerformance: bool
+    priority: Optional[int] = None
+    raceType: Optional[str] = None
+    trackAbbreviation: Optional[str] = None
+    trackName: Optional[str] = None
+    trackNumber: Optional[int] = None
+    mainPerformance: Optional[bool] = None
     totoPools: Optional[list] = None
     epgStartTime: Optional[int] = None
     epgStopTime: Optional[int] = None
     epgChannel: Optional[int] = None
-    jackpotPools: list[dict]
-    bonusPools: list[dict]
-    fullHitPotPools: list[dict]
-    vowedPayoutPools: list[dict]
+    # The live-progress pool blobs are never read; they exist to document the
+    # payload and must not be able to reject a card.
+    jackpotPools: Optional[list[dict]] = None
+    bonusPools: Optional[list[dict]] = None
+    fullHitPotPools: Optional[list[dict]] = None
+    vowedPayoutPools: Optional[list[dict]] = None
 
 
 class Race(BaseModel):
     raceId: int
     cardId: int
-    number: int
-    distance: int
+    number: Optional[int] = None
+    distance: Optional[int] = None
     breed: Optional[str] = None
-    seriesSpecification: str
-    raceStatus: str
-    startType: str
-    monte: bool
-    firstPrize: int
+    seriesSpecification: Optional[str] = None
+    raceStatus: Optional[str] = None
+    startType: Optional[str] = None
+    monte: Optional[bool] = None
+    firstPrize: Optional[int] = None
     startTime: Optional[int] = None  # absent on cards older than roughly 2010
     intermediateTimesString: Optional[str] = None
     toteResultString: Optional[str] = None
     reserveHorsesOrder: Optional[str] = None
-    raceRider: str
-    trackProfile: str
+    raceRider: Optional[str] = None
+    trackProfile: Optional[str] = None
     photoFinishUrl: Optional[str] = None
 
 
@@ -122,27 +124,38 @@ class PrevStart(BaseModel):
     specialCart: Optional[str] = None
 
 
+# Only the four fields that identify a start are required: raceId + startNumber
+# key `archive.start`, runnerId keys the stat and bet-percentage rows, and
+# horseName builds the horse key. A runner missing any of those cannot be
+# placed and should fail loudly.
+#
+# Everything else is Optional on purpose. A validation error costs the *whole*
+# runner — its start, horse, stats and career line — so a required field is a
+# standing offer to trade a full row for a cosmetic one. The API has taken that
+# offer repeatedly: thin pre-2010 cards, absent breeding on a 2005 runner, a
+# 2021 runner with no `coachNameInitials`, and the `Poissa` ("absent")
+# placeholder the API sends for a vacated start number, which carries no
+# `coachName` at all. Genuine schema drift still shows up as NULLs in the
+# tables rather than as silence.
 class Runner(BaseModel):
     runnerId: int
     raceId: int
     horseName: str
     startNumber: int
-    startTrack: int
-    distance: int
-    scratched: bool
-    prize: int
-    frontShoes: str
-    rearShoes: str
-    frontShoesChanged: bool
-    rearShoesChanged: bool
-    # Breeding and birth date go missing on the oldest cards (one runner in 349
-    # sampled from 2005), so none of them can be required.
+    startTrack: Optional[int] = None
+    distance: Optional[int] = None
+    scratched: Optional[bool] = None
+    prize: Optional[int] = None
+    frontShoes: Optional[str] = None
+    rearShoes: Optional[str] = None
+    frontShoesChanged: Optional[bool] = None
+    rearShoesChanged: Optional[bool] = None
     sire: Optional[str] = None
     dam: Optional[str] = None
     damSire: Optional[str] = None
-    horseAge: int
+    horseAge: Optional[int] = None
     birthDate: Optional[date] = None
-    gender: str
+    gender: Optional[str] = None
     color: Optional[dict] = None
     mobileStartRecord: Optional[str] = None
     handicapRaceRecord: Optional[str] = None
@@ -153,12 +166,12 @@ class Runner(BaseModel):
     driverRacingColors: Optional[str] = None
     driverHelmetColors: Optional[str] = None
     driverStats: Optional[str] = None
-    coachName: str
-    coachNameInitials: str
-    ownerName: str
+    coachName: Optional[str] = None
+    coachNameInitials: Optional[str] = None
+    ownerName: Optional[str] = None
     ownerHomeTown: Optional[str] = None
     handicapRating: Optional[int] = None
-    specialCart: str
+    specialCart: Optional[str] = None
     condition: Optional[int] = None
     expectedValue: Optional[int] = None
     # These three ride along only on cards that are still current; historical
