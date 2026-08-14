@@ -1,9 +1,12 @@
 import pytest
 
-from veikkaus_bot.models import Runner
-from veikkaus_bot.parse import (_captured_at, betpercentage_records, horse_key,
-                                is_placeholder, normalize_name, parse_km_time,
-                                parse_meet_date, parse_result, parse_tote_result,
+from veikkaus_bot.models import HeppaStart, Runner
+from veikkaus_bot.parse import (_captured_at, betpercentage_records,
+                                heppa_start_record, horse_key, is_placeholder,
+                                normalize_name, parse_heppa_auto_start,
+                                parse_heppa_int, parse_heppa_km_time,
+                                parse_heppa_odds, parse_km_time, parse_meet_date,
+                                parse_placing, parse_result, parse_tote_result,
                                 parse_win_odd, prevstart_records, stat_records)
 
 
@@ -203,3 +206,153 @@ def test_captured_at_uses_an_explicit_sentinel_when_nothing_is_known():
 
 def test_captured_at_treats_an_explicit_null_like_a_missing_field():
     assert _captured_at({'updated': None}, 1118826000000) == 1118826000000
+
+
+# --- Heppa ------------------------------------------------------------------
+
+@pytest.mark.parametrize('text, expected', [
+    ('2080', 2080), ('0', 0),
+    ('-5', -5),                        # temperature goes negative in winter
+    ('-', None), ('', None), (None, None), ('1,5', None), ('4.44', None),
+])
+def test_parse_heppa_int(text, expected):
+    assert parse_heppa_int(text) == expected
+
+
+@pytest.mark.parametrize('code, placement', [
+    ('1', 1), ('7', 7), ('13', 13),   # the whole field, not just the paid places
+    ('0', None),                      # absent, or disqualified under hpl/hll/hrp/k
+    # 100 + the position a disqualified horse crossed the line in. It holds no
+    # placing — the same treatment archive.prev_start gives 'hlo4'.
+    ('105', None), ('108', None), ('110', None),
+    ('', None), (None, None), ('-', None),
+])
+def test_parse_placing(code, placement):
+    assert parse_placing(code) == placement
+
+
+@pytest.mark.parametrize('text, ms', [
+    ('1.18.8', 78800), ('1.29.0', 89000), ('1.41.1', 101100),
+    ('2.05.0', 125000),
+    (None, None), ('', None), ('-', None), ('18,8', None), ('1.18', None),
+])
+def test_parse_heppa_km_time(text, ms):
+    assert parse_heppa_km_time(text) == ms
+
+
+@pytest.mark.parametrize('long_form, short_form', [
+    ('1.18.8', '18,8'), ('1.19.8', '19,8'), ('1.29.0', '29,0'), ('2.05.0', '2.05,0'),
+])
+def test_the_two_km_time_forms_agree(long_form, short_form):
+    """Heppa sends both. The short one is byte-identical to the notation
+    archive.start already uses, so the record builder prefers it and falls back
+    to the long form — which only works if they mean the same thing."""
+    assert parse_heppa_km_time(long_form) == parse_km_time(short_form)[0]
+
+
+@pytest.mark.parametrize('text, hundredths', [
+    ('4.44', 444), ('19.71', 1971), ('56.51', 5651), ('3.58', 358), ('69.07', 6907),
+    ('100', 10000),
+    (None, None), ('', None), ('-', None),
+])
+def test_parse_heppa_odds(text, hundredths):
+    """Heppa sends a decimal; the archive stores hundredths everywhere else."""
+    assert parse_heppa_odds(text) == hundredths
+
+
+@pytest.mark.parametrize('code, auto', [
+    ('ake', True), ('aly', True), ('akp', True),
+    ('ke', False), ('ly', False), ('kp', False),
+    (None, None), ('', None),
+])
+def test_parse_heppa_auto_start(code, auto):
+    """The 'a' prefix on distanceCode is the auto-start signal — not the race's
+    startForm, which is handicap-versus-group and a different axis entirely."""
+    assert parse_heppa_auto_start(code) == auto
+
+
+# The Savonlinna 2026-08-08 race 1 winner, verbatim from the API. Its Veikkaus
+# counterpart carries placement 1, kmTime '18,8' and winOddsFinal 444, and
+# careerWinnings 142000 (cents, pre-race) against horsePriceSum 2120 (euros,
+# post-race) — 1420 + the 700 won that day.
+BOOMER = {'date': '2026-08-08', 'trackCode': 'SN', 'startNumber': '1',
+          'programNumber': '9', 'lane': '1', 'distance': '2080', 'placing': '1',
+          'totalTime': '2.43.8', 'kilometerTime': '1.18.8',
+          'shortKilometerTime': '18,8', 'price': '700', 'winOdds': '4.44',
+          'horseId': '7913507947789197818', 'horseName': "Boomer's Revenge",
+          'trainerId': '828320150867768153', 'trainerName': 'Pasi Vaittinen',
+          'gallop': False, 'absent': False, 'shoesFront': 'K', 'shoesBack': 'K',
+          'driverId': '828320150867768153', 'driverName': 'P Vaittinen',
+          'horsePriceSum': '2120', 'distanceCode': 'ke'}
+
+
+def heppa_field(record):
+    """Read a heppa_start record back by column name."""
+    names = ('meetDate trackCode raceNumber programNumber horseKey horseId horseName '
+             'horseBreed horseRegistrationCountry startTrack distance distanceCode '
+             'placingRaw placement disqualifiedCode gallop absent kmTime kmTimeMs '
+             'autoStart totalTime prizeWon winOdd horsePriceSum').split()
+    return dict(zip(names, record))
+
+
+def test_heppa_start_record_reads_the_race_and_horse_numbers_the_right_way_round():
+    """Heppa's `startNumber` is the race number and `programNumber` is the
+    horse's start number — the exact inverse of the Veikkaus vocabulary."""
+    row = heppa_field(heppa_start_record(HeppaStart(**BOOMER)))
+    assert row['raceNumber'] == 1
+    assert row['programNumber'] == 9
+
+
+def test_heppa_start_record_converts_the_scalars():
+    row = heppa_field(heppa_start_record(HeppaStart(**BOOMER)))
+    assert row['placement'] == 1
+    assert row['kmTime'] == '18,8'
+    assert row['kmTimeMs'] == 78800
+    assert row['winOdd'] == 444          # '4.44' -> hundredths
+    assert row['prizeWon'] == 700        # this race's purse, not career earnings
+    assert row['horsePriceSum'] == 2120
+    assert row['autoStart'] is False     # 'ke' has no 'a' prefix
+    assert row['horseId'] == '7913507947789197818'   # stays a string
+
+
+def test_heppa_start_record_falls_back_to_the_long_km_time():
+    row = heppa_field(heppa_start_record(
+        HeppaStart(**(BOOMER | {'shortKilometerTime': None}))))
+    assert row['kmTimeMs'] == 78800
+    assert row['kmTime'] is None
+
+
+def test_heppa_start_record_keeps_a_disqualification_out_of_placement():
+    """'108' is 8th across the line, disqualified. Putting 8 in `placement`
+    would give the race two 8th places once the field is renumbered."""
+    row = heppa_field(heppa_start_record(HeppaStart(
+        **(BOOMER | {'placing': '108', 'disqualifiedCode': 'hlo', 'gallop': True}))))
+    assert row['placement'] is None
+    assert row['placingRaw'] == '108'    # the position survives verbatim
+    assert row['disqualifiedCode'] == 'hlo'
+    assert row['gallop'] is True
+
+
+def test_heppa_start_record_leaves_a_scratched_horse_unplaced():
+    row = heppa_field(heppa_start_record(HeppaStart(
+        **(BOOMER | {'placing': '0', 'absent': True, 'price': '0',
+                     'kilometerTime': None, 'shortKilometerTime': None}))))
+    assert row['placement'] is None
+    assert row['absent'] is True
+    assert row['kmTimeMs'] is None
+
+
+def test_heppa_start_record_leaves_horse_key_to_the_recompute():
+    """A Heppa start carries no birth year, so horse_key() cannot be built from
+    one — identity comes back through the registry id instead."""
+    assert heppa_field(heppa_start_record(HeppaStart(**BOOMER)))['horseKey'] is None
+
+
+def test_heppa_start_record_survives_a_payload_with_only_the_identifying_fields():
+    """Every optional field is optional on purpose: a validation error would
+    cost the whole start, which is the row that fills a hole in archive.start."""
+    row = heppa_field(heppa_start_record(HeppaStart(
+        date='2005-06-15', trackCode='S', startNumber='3', programNumber='4')))
+    assert (row['meetDate'], row['trackCode'], row['raceNumber'],
+            row['programNumber']) == ('2005-06-15', 'S', 3, 4)
+    assert row['placement'] is None

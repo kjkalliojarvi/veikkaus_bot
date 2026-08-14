@@ -5,7 +5,9 @@ import sys
 
 from .archive_db import DEFAULT_DB
 from .crawler import backfill, status
+from .crosscheck import crosscheck
 from .fetcher import DEFAULT_DELAY
+from .heppa import backfill as heppa_backfill
 from .parse import parse
 
 DEFAULT_RAW = 'data/raw'
@@ -52,6 +54,24 @@ def veikkaus():
                                  help='Reset failed manifest rows to pending before crawling')
     parser_backfill.set_defaults(func=backfill)
 
+    parser_heppa = subparser.add_parser(
+        'heppa', help="Crawl Hippos's Heppa registry for the full finishing order (resumable)")
+    parser_heppa.add_argument('--from', dest='start', required=True,
+                              help='First meet date to crawl (yyyy-mm-dd)')
+    parser_heppa.add_argument('--to', dest='end', default=None,
+                              help='Last meet date to crawl (yyyy-mm-dd, default: today)')
+    parser_heppa.add_argument('--raw', default=DEFAULT_RAW,
+                              help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_heppa.add_argument('--db', default=DEFAULT_DB,
+                              help=f'DuckDB database holding the manifest (default: {DEFAULT_DB})')
+    parser_heppa.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                              help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    parser_heppa.add_argument('--limit', type=int, default=None,
+                              help='Stop after N fetches (for a trial run)')
+    parser_heppa.add_argument('--retry-failed', action='store_true',
+                              help='Reset failed manifest rows to pending before crawling')
+    parser_heppa.set_defaults(func=heppa_backfill)
+
     parser_parse = subparser.add_parser(
         'parse', help='Parse the raw archive into the archive.* tables')
     parser_parse.add_argument('--raw', default=DEFAULT_RAW,
@@ -65,6 +85,12 @@ def veikkaus():
     parser_status.add_argument('--db', default=DEFAULT_DB,
                                help=f'DuckDB database file (default: {DEFAULT_DB})')
     parser_status.set_defaults(func=status)
+
+    parser_crosscheck = subparser.add_parser(
+        'crosscheck', help='Cross-validate the Veikkaus and Heppa halves of the archive')
+    parser_crosscheck.add_argument('--db', default=DEFAULT_DB,
+                                   help=f'DuckDB database file (default: {DEFAULT_DB})')
+    parser_crosscheck.set_defaults(func=crosscheck)
 
     #parser_card = subparser.add_parser('card', help='Ravit')
     #parser_card.add_argument('-n', '--name', help='Radan nimi')

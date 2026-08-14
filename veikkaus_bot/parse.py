@@ -12,7 +12,8 @@ from . import archive_db
 from .archive_db import ArchiveDb, db_ops
 from .crawler import Manifest
 from .fetcher import read_raw
-from .models import Card, Race, Runner, Stat
+from .models import (Card, HeppaEvent, HeppaRaceEntry, HeppaStart, Race, Runner,
+                     Stat)
 
 
 FLUSH = 5000
@@ -101,6 +102,90 @@ def parse_tote_result(text: str | None) -> list[int]:
     return [int(part) for part in text.split('-') if part.strip().isdigit()]
 
 
+# --- Heppa ------------------------------------------------------------------
+#
+# Heppa sends every scalar as a string, and uses '-' for "no value" in several
+# places, so each of these has to decide what an absent field looks like rather
+# than leaning on a type.
+HEPPA_INT_RE = re.compile(r'^-?\d+$')
+
+
+def parse_heppa_int(text: str | None) -> int | None:
+    """A Heppa numeric string to an int. '-' and '' mean absent.
+
+    The sign matters: `temperature` goes negative on a winter card.
+    """
+    if text is None:
+        return None
+    text = text.strip()
+    return int(text) if HEPPA_INT_RE.match(text) else None
+
+
+def parse_placing(text: str | None) -> int | None:
+    """A Heppa `placing` to a finishing position, when it is one.
+
+    Three regimes, all observed:
+
+    - `'0'` — no placing at all: the horse was absent, or was disqualified
+      under `hpl`/`hll`/`hrp`/`k`.
+    - `'1'`-`'13'` — a real finishing position, for the whole field rather than
+      just the paid places. This is the value that fills `archive.start`.
+    - `'105'`, `'108'`, `'110'` — 100 + the position the horse crossed the line
+      in, always alongside `disqualifiedCode='hlo'`. A disqualified horse holds
+      no position, so this returns None and the code survives in `placingRaw`.
+      This is the same information `archive.prev_start` already carries as
+      `hlo4`, and the same treatment: `parse_result()` leaves those NULL too.
+      Filling `placement` from it would put two horses in the same position in
+      one race and break the placings-are-unique check of strategy §8.
+    """
+    value = parse_heppa_int(text)
+    if value is None or value <= 0 or value >= 100:
+        return None
+    return value
+
+
+def parse_heppa_km_time(text: str | None) -> int | None:
+    """'1.18.8' -> 78800 ms, the long form of a km time.
+
+    Only needed where `shortKilometerTime` ('18,8', which `parse_km_time`
+    already reads) is absent. Unlike the short form this one is unambiguous —
+    the minute is always spelled out — so there is no start-type suffix to
+    read, and `distanceCode` carries that instead.
+    """
+    if not text:
+        return None
+    parts = text.strip().split('.')
+    if len(parts) != 3 or not all(HEPPA_INT_RE.match(p) for p in parts):
+        return None
+    minutes, seconds, tenths = (int(p) for p in parts)
+    return minutes * 60000 + seconds * 1000 + tenths * 100
+
+
+def parse_heppa_odds(text: str | None) -> int | None:
+    """'4.44' -> 444. Heppa sends a decimal where the rest of the archive
+    stores hundredths, matching `probable` and `prev_start.winOdd`.
+    """
+    if not text:
+        return None
+    try:
+        return round(float(text.strip()) * 100)
+    except ValueError:
+        return None
+
+
+def parse_heppa_auto_start(distance_code: str | None) -> bool | None:
+    """Auto start from a Heppa start's `distanceCode` ('ke'/'ake'/'ly'/'aly').
+
+    An 'a' prefix is the auto start, the same convention the km-time suffix
+    uses elsewhere in the archive. Note this is *not* readable from the race's
+    `startForm`: TASOITUSAJO/RYHMALAHTO is handicap-versus-group, a different
+    axis from CAR/VOLT. Unknown stays NULL rather than defaulting to volt.
+    """
+    if not distance_code:
+        return None
+    return distance_code.strip().lower().startswith('a')
+
+
 def card_record(card: Card) -> tuple:
     """Column order must stay in sync with archive_db.INSERT_CARD."""
     return (card.cardId,
@@ -154,18 +239,32 @@ def is_placeholder(runner: Runner) -> bool:
 
 
 def horse_record(runner: Runner) -> tuple:
-    """Column order must stay in sync with archive_db.INSERT_HORSE."""
+    """Column order must stay in sync with archive_db.INSERT_HORSE.
+
+    `heppaHorseId` is NULL here and recomputed from the races both sources
+    cover — the Veikkaus API exposes no registration number at all.
+    """
     return (horse_key(runner.horseName, birth_year(runner)),
             runner.horseName,
             birth_year(runner),
             runner.gender,
             runner.sire,
             runner.dam,
-            runner.damSire)
+            runner.damSire,
+            None)    # heppaHorseId — see archive_db.RECOMPUTE_HEPPA_HORSE_ID
 
 
 def start_record(runner: Runner, result: dict | None, win_odds: int | None) -> tuple:
-    """Column order must stay in sync with archive_db.INSERT_START."""
+    """One row of `archive.start`.
+
+    The last four columns are left NULL here and filled from `heppa_start`
+    after loading — see archive_db.RECOMPUTE_START_FROM_HEPPA. Writing them
+    NULL on every parse is deliberate: it means a re-crawl of the Veikkaus half
+    cannot leave a stale registry value behind, since the recompute re-derives
+    all four from scratch at the end of every run.
+
+    Column order must stay in sync with archive_db.INSERT_START.
+    """
     result = result or {}
     km_time = result.get('kmTime')
     km_time_ms, auto_start = parse_km_time(km_time)
@@ -193,7 +292,11 @@ def start_record(runner: Runner, result: dict | None, win_odds: int | None) -> t
             # recorded a time. recompute_auto_starts() then sets this from
             # race.startType, which covers every runner.
             auto_start if km_time_ms else None,
-            win_odds if win_odds is not None else result.get('winOdds'))
+            win_odds if win_odds is not None else result.get('winOdds'),
+            None,    # prizeWon         \
+            None,    # disqualifiedCode  } from archive.heppa_start, after loading
+            None,    # gallop           /
+            None)    # resultSource — which source ended up supplying placement
 
 
 def stat_records(runner: Runner) -> list[tuple]:
@@ -289,6 +392,118 @@ def prevstart_records(runner: Runner) -> list[tuple]:
                         None,    # startInterval — recomputed after loading
                         None))   # coachName — sourced from archive.start, ditto
     return records
+
+
+def heppa_event_record(event: HeppaEvent) -> tuple:
+    """One race meeting from the Heppa results listing.
+
+    Cancelled meetings are kept — a meeting that did not happen is a fact worth
+    recording, and `canceled` says so. They simply have no races under them.
+
+    Column order must stay in sync with archive_db.INSERT_HEPPA_EVENT.
+    """
+    return (event.date,
+            event.trackCode,
+            parse_heppa_int(event.trackNumber),
+            event.trackShortname,
+            event.trackName,
+            event.trackCity,
+            event.eventType,
+            event.name,
+            event.startTime,
+            parse_heppa_int(event.meetNumber),
+            event.trackType,
+            event.trackCondition,
+            parse_heppa_int(event.temperature),
+            event.specialRaceEventName,
+            event.majorRace,
+            event.canceled)
+
+
+def heppa_race_record(entry: HeppaRaceEntry) -> tuple:
+    """One race. `intermediateTime` sits on the entry, not on the race.
+
+    Column order must stay in sync with archive_db.INSERT_HEPPA_RACE.
+    """
+    race = entry.race
+    return (race.date,
+            race.trackCode,
+            parse_heppa_int(race.startNumber),  # Heppa's startNumber is the race number
+            race.raceName,
+            parse_heppa_int(race.categoryNumber),
+            race.plannedTime,
+            race.actualTime,
+            race.startForm,
+            race.monte,
+            race.eventType,
+            parse_heppa_int(race.baseDistance),
+            race.levellingHeader,
+            parse_heppa_int(race.firstPrice),
+            parse_heppa_int(race.priceSum),
+            race.status,
+            entry.intermediateTime)
+
+
+def heppa_start_record(start: HeppaStart) -> tuple:
+    """One horse in one race, from the official registry.
+
+    The km time is read from `shortKilometerTime` where it exists, because that
+    is byte-identical to the notation `archive.start.kmTime` already uses and
+    `parse_km_time` already handles; `kilometerTime` is the long-form fallback.
+    The auto-start flag deliberately does *not* come from that time's suffix —
+    `distanceCode` carries it for every horse, including those with no time.
+
+    `horseKey` is NULL here: a Heppa start carries no birth year, so identity
+    cannot be computed from it. archive_db.RECOMPUTE_HEPPA_START_HORSEKEY
+    fills it through the registry id instead.
+
+    Column order must stay in sync with archive_db.INSERT_HEPPA_START.
+    """
+    km_time = start.shortKilometerTime
+    km_time_ms = parse_km_time(km_time)[0]
+    if km_time_ms is None:
+        km_time_ms = parse_heppa_km_time(start.kilometerTime)
+    return (start.date,
+            start.trackCode,
+            parse_heppa_int(start.startNumber),    # the race number
+            parse_heppa_int(start.programNumber),  # the horse's start number
+            None,                                  # horseKey — recomputed
+            start.horseId,
+            start.horseName,
+            start.horseBreed,
+            start.horseRegistrationCountry,
+            parse_heppa_int(start.lane),
+            parse_heppa_int(start.distance),
+            start.distanceCode,
+            start.placing,
+            parse_placing(start.placing),
+            start.disqualifiedCode,
+            start.gallop,
+            start.absent,
+            km_time,
+            km_time_ms,
+            parse_heppa_auto_start(start.distanceCode),
+            start.totalTime,
+            parse_heppa_int(start.price),
+            parse_heppa_odds(start.winOdds),
+            parse_heppa_int(start.horsePriceSum),
+            start.driverId,
+            start.driverName,
+            start.driverFirstName,
+            start.driverLastName,
+            start.originalDriverId,
+            start.trainerId,
+            start.trainerName,
+            start.ownerName,
+            start.ownerCity,
+            start.shoesFront,
+            start.shoesBack,
+            start.americanSulkyKEX,
+            start.record,
+            start.recordType,
+            start.monte,
+            start.status,
+            start.commentText)
 
 
 def _flush(store, rows, force=False):
@@ -489,6 +704,69 @@ def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
     return count, prevstart_count
 
 
+def _heppa_entries(task, payload) -> list:
+    """The elements of a Heppa payload.
+
+    Heppa sends bare lists where the Veikkaus API sends a `collection` wrapper.
+    Anything else is drift worth naming rather than iterating into: a dict
+    would otherwise loop over its keys and fail one confusing row at a time.
+    """
+    if isinstance(payload, list):
+        return payload
+    print(f'{task.rawPath}: expected a list, got {type(payload).__name__}')
+    return []
+
+
+def _parse_heppa_events(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
+    """The meetings listing, including the cancelled and the non-toto ones."""
+    rows = []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_results'):
+        for day in _heppa_entries(task, payload):
+            for raw in day.get('events', []):
+                if not raw.get('finnishTrack'):
+                    continue
+                try:
+                    rows.append(heppa_event_record(HeppaEvent(**raw)))
+                    count += 1
+                except Exception as e:
+                    print(f'{task.rawPath}: event {raw.get("date")} '
+                          f'{raw.get("trackCode")}: {e}')
+        _flush(db.store_heppa_events, rows)
+    _flush(db.store_heppa_events, rows, force=True)
+    return count
+
+
+def _parse_heppa_races(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
+    rows = []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_races'):
+        for raw in _heppa_entries(task, payload):
+            try:
+                rows.append(heppa_race_record(HeppaRaceEntry(**raw)))
+                count += 1
+            except Exception as e:
+                print(f'{task.rawPath}: race {raw.get("race", {}).get("startNumber")}: {e}')
+        _flush(db.store_heppa_races, rows)
+    _flush(db.store_heppa_races, rows, force=True)
+    return count
+
+
+def _parse_heppa_starts(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
+    rows = []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_start'):
+        for raw in _heppa_entries(task, payload):
+            try:
+                rows.append(heppa_start_record(HeppaStart(**raw)))
+                count += 1
+            except Exception as e:
+                print(f'{task.rawPath}: start {raw.get("programNumber")}: {e}')
+        _flush(db.store_heppa_starts, rows)
+    _flush(db.store_heppa_starts, rows, force=True)
+    return count
+
+
 def parse_all(db_name: str, raw_root: str, country: str) -> dict:
     """Walk the raw zone into the archive tables. Idempotent."""
     with db_ops(db_name) as conn:
@@ -501,11 +779,19 @@ def parse_all(db_name: str, raw_root: str, country: str) -> dict:
         cards = _parse_cards(manifest, raw_root, db, country)
         races = _parse_races(manifest, raw_root, db)
         starts, prevstarts = _parse_runners(manifest, raw_root, db, results, odds)
+        heppa_events = _parse_heppa_events(manifest, raw_root, db)
+        heppa_races = _parse_heppa_races(manifest, raw_root, db)
+        heppa_starts = _parse_heppa_starts(manifest, raw_root, db)
         db.recompute_start_intervals()
         db.recompute_prev_start_coaches()
         db.recompute_auto_starts()
+        # After the Veikkaus-only recomputes: identity first, then the merge
+        # that reads it.
+        db.recompute_heppa_links()
+        db.recompute_start_from_heppa()
         counts = {'cards': cards, 'races': races, 'starts': starts,
-                  'prev-starts': prevstarts}
+                  'prev-starts': prevstarts, 'heppa events': heppa_events,
+                  'heppa races': heppa_races, 'heppa starts': heppa_starts}
     return counts
 
 

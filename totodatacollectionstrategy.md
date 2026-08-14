@@ -224,7 +224,7 @@ With this shape, "past performances of horse X before date D" is one indexed que
 
 ### 5b. As implemented
 
-The schema above is DDL-sketch, not the literal build. Three deliberate deviations:
+The schema above is DDL-sketch, not the literal build. Four deliberate deviations:
 
 - **DuckDB, not SQLite.** The repository's storage backend is DuckDB, so the archive lives in
   the same `veikkaus_data.duckdb` file under its own `archive` schema. That keeps the plan's
@@ -236,6 +236,11 @@ The schema above is DDL-sketch, not the literal build. Three deliberate deviatio
 - **`start.horseKey` is `normalize(name)|birthYear`**, where normalize folds case and spacing
   and drops the `*` marker but *keeps* a country tag such as `(SE)` — that tag is precisely
   what separates an import from a same-named domestic horse.
+- **A second source has its own tables.** `heppa_event`, `heppa_race` and `heppa_start` hold
+  the Heppa registry verbatim (§8b), keyed on (meetDate, trackCode[, raceNumber[,
+  programNumber]]) because Heppa exposes no `cardId` or `raceId`. `start` gained `prizeWon`,
+  `disqualifiedCode`, `gallop` and `resultSource`, and `horse` gained `heppaHorseId`; all five
+  are written NULL by the parser and derived afterwards, like `startInterval` before them.
 
 **Parsing traps to handle deliberately** (unit-test these): Finnish km-time notation (`14,5a` = 1:14.5 with auto start; `a` suffix and gallop marks), result codes for disqualified/broke/did-not-finish starts (hylätty, keskeytti, poisjäänyt), volt-start distance handicaps (a 2140 m runner in a "2100 m" race), and cancelled races/cards.
 
@@ -255,7 +260,58 @@ The daily cycle: in the morning, fetch `/cards/today` (and tomorrow's date) and 
 
 ## 8. Validation and cross-checking
 
-Trust but verify, per phase. After backfill, run structural checks: every card has races, every non-cancelled official race has runners with results, placings within a race are consistent (unique, gap-free apart from dq/dnf), km times fall in plausible ranges (1:08–1:50), and per-year race counts match the ~5,500–6,500 expectation. Then spot-check ~20 random races against the public results in Hippos's [Heppa system](https://heppa.hippos.fi/heppa/racing/RaceResults.html) — placings, km times and drivers should match exactly; Heppa is the official registry and also your fallback data source if the Veikkaus API is retired in the 2027 market transition. Finally, sanity-check the ML view: pick a well-known horse, pull its reconstructed career line from `start`, and compare with its Heppa career page — this specifically validates the horse-identity resolution of §5.
+Trust but verify, per phase. After backfill, run structural checks: every card has races, every non-cancelled official race has runners with results, placings within a race are consistent (unique, gap-free apart from dq/dnf), km times fall in plausible ranges (1:08–1:50), and per-year race counts match the ~5,500–6,500 expectation. Finally, sanity-check the ML view: pick a well-known horse, pull its reconstructed career line from `start`, and compare with its Heppa career page — this specifically validates the horse-identity resolution of §5.
+
+### 8b. Heppa, as implemented
+
+Heppa was planned here as a manual spot-check and a fallback. It is now a **crawled source in its
+own right** — `veikkaus heppa` — because the gap it fills turned out to be far larger than §2b's
+optimism about `prev_start` allowed for. Of 268,864 starts at Finnish meetings in the 2021→ archive,
+**195,690 had no placing at all**: `prev_start` only recovers a start for a horse that raced again
+*while the card was still current*, so the backfilled years recover essentially nothing (13,271 rows
+against 26,348 races, 84 % of them 2026).
+
+The registry publishes the whole field for every Finnish meeting back to at least 2000, through the
+Mobiiliheppa backend at `https://heppa.hippos.fi/heppa2_backend`: `/race/results/{from}/{to}/` lists
+the meetings in a date range, `/race/{date}/{trackCode}/races` their races, and
+`/race/{date}/{trackCode}/start/{raceNo}` the field. Unauthenticated, and — unlike the Veikkaus
+paths — not disallowed by `robots.txt`, which names only `/heppa/racing`, `/heppa/horse` and
+`/heppa/person`. Roughly 28,000 requests for the 2021→ window, ~16 h at the 2 s delay.
+
+Three things arrive that the Veikkaus API has no equivalent of anywhere: **this race's prize money
+per horse** (`runner.prize` is career earnings, as §2b established), a **disqualification code for
+every start** rather than only for horses that were re-reported, and **stable registry ids** for
+horses, drivers and trainers — which settles the §5 horse-identity problem outright, since
+`horse_key()` is a name-and-birth-year guess and `horseId` is authoritative. Track conditions and
+temperature come along too.
+
+The cross-check §8 asked for is now a query rather than 20 manual lookups — `veikkaus crosscheck`.
+Every start where both sources have a placing is a comparison, and `archive.start.resultSource`
+records which source supplied each one. The merge coalesces — Veikkaus never gets overwritten — so
+a disagreement is visible rather than resolved silently.
+
+Run on the first crawled day (2026-08-08, four meetings, 369 registry starts, 224 of them joining
+to a Veikkaus start), the two sources agreed on **every** overlapping value: 60/60 placings,
+187/187 km times in milliseconds, 224/224 auto-start flags, 209/209 final win odds, 224/224
+scratchings against `absent`. No horse-identity collision in either direction. Savonlinna race 1
+went from 3 placings to 11. Two things the comparison exposed that are worth knowing:
+
+- **Horse names differ on 50 of 224 rows, and that is correct.** Veikkaus appends the country tag
+  (`Kapplans Orlando (SE)`); Heppa keeps it in `horseRegistrationCountry` and leaves the name clean.
+  This is exactly why the bridge between the sources is positional and never name-based.
+- **Km-time *strings* differ on 30 of 60**, because Veikkaus carries the start-type and equipment
+  markers (`31,5x`, `m18,5a`) and Heppa's short form is bare. The parsed `kmTimeMs` agrees
+  everywhere. After the merge `archive.start.kmTime` is therefore not uniform; analyse on
+  `kmTimeMs` and `autoStart`.
+
+That 224/224 auto-start agreement is itself a result: it independently confirms that the `a` prefix
+on Heppa's per-horse `distanceCode` means the same thing as `race.startType = 'CAR_START'`.
+
+**Heppa does not replace the Veikkaus crawl.** It has no odds history (269,010 `odds_snapshot`
+rows) and no betting percentages (414,457 rows), and its horse-level figures are as-of-now rather
+than as-of-race-day: `horsePriceSum` includes the race being reported, where `careerWinnings` is
+the pre-race number. Both crawls stay, and the 2027 fallback argument is now stronger, not weaker —
+the results half of the dataset no longer depends on Veikkaus at all.
 
 ## 9. Phased plan
 
@@ -263,7 +319,8 @@ Trust but verify, per phase. After backfill, run structural checks: every card h
 |---|---|---|---|
 | **0 — Probe** | Verify endpoints & field names (§2 checklist), download `toto.xsd`, determine historical reach and rate-limit behavior, fix the FI-card filter | ½–1 day | **done** — §2b |
 | **1 — Build** | Manifest ledger, fetcher with politeness/backoff, raw-zone writer, parsers + schema, unit tests for km-time/result-code parsing | 2–3 days | **done** — `veikkaus backfill` / `parse` / `status` |
-| **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks + Heppa spot-checks | ~1–2 days wall-clock | not started |
+| **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks | ~1–2 days wall-clock | **done** — 2021-01-01 → 2026-08, 2,701 cards / 26,348 races |
+| **2b — Heppa** | Crawl the registry for the finishing order the Veikkaus API structurally cannot publish (§8b); merge into `start`, resolve horse identity | ~16 h wall-clock | **done** — `veikkaus heppa` |
 | **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time | ½ day to set up | not started |
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 
@@ -295,9 +352,9 @@ history is thus a function of backfill depth, and grows as the crawl does.
 
 | Risk | Mitigation |
 |---|---|
-| API restructured/retired in 2027 licensing transition | Backfill early; archive raw JSON; Heppa as fallback source |
+| API restructured/retired in 2027 licensing transition | Backfill early; archive raw JSON; **Heppa now crawled as a second source (§8b)**, so the results half no longer depends on Veikkaus |
 | Historical odds/pools not available far back | Accept results-only history for old years; collect odds forward from now |
-| No stable horse ID in payloads | name+birth-year key, collision review, Heppa as authority |
+| No stable horse ID in payloads | name+birth-year key, **resolved against Heppa's `horseId` (§8b)**, which makes the collision review a query |
 | robots.txt / ToS friction | Slow single-threaded crawl, identifying User-Agent, personal-research scope, consider asking for sanctioned access |
 | Silent schema drift in the API | Raw zone + manifest lets you re-parse; log unknown fields loudly |
 

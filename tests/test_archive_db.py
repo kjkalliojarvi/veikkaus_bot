@@ -5,8 +5,12 @@ from veikkaus_bot import archive_db
 from veikkaus_bot.archive_db import ArchiveDb
 
 
-PREVSTART_COLUMNS = 30
-START_COLUMNS = 22
+# Derived from the INSERT statements rather than written down, so that adding a
+# column to a table cannot leave these silently short.
+PREVSTART_COLUMNS = archive_db.INSERT_PREVSTART.count('?')
+START_COLUMNS = archive_db.INSERT_START.count('?')
+HEPPA_START_COLUMNS = archive_db.INSERT_HEPPA_START.count('?')
+HORSE_COLUMNS = archive_db.INSERT_HORSE.count('?')
 
 
 def prevstart(prior_start_id, horse_key, meet_date, race_number=1):
@@ -16,10 +20,12 @@ def prevstart(prior_start_id, horse_key, meet_date, race_number=1):
     return tuple(row)
 
 
-def start(race_id, start_number, horse_key, coach_name, auto_start=None):
+def start(race_id, start_number, horse_key, coach_name, auto_start=None,
+          placement=None, km_time=None, win_odds=None):
     row = [None] * START_COLUMNS
     row[0], row[1], row[3], row[6] = race_id, start_number, horse_key, coach_name
-    row[20] = auto_start
+    row[17], row[18] = placement, km_time
+    row[20], row[21] = auto_start, win_odds
     return tuple(row)
 
 
@@ -29,9 +35,27 @@ def race(race_id, card_id, number, start_type=None):
     return tuple(row)
 
 
-def card(card_id, meet_date):
+def card(card_id, meet_date, track_abbreviation=None):
     row = [None] * 11
-    row[0], row[2] = card_id, meet_date
+    row[0], row[2], row[3] = card_id, meet_date, track_abbreviation
+    return tuple(row)
+
+
+def horse(horse_key):
+    row = [None] * HORSE_COLUMNS
+    row[0] = horse_key
+    return tuple(row)
+
+
+def heppa_start(meet_date, track_code, race_number, program_number, horse_id=None,
+                placement=None, km_time=None, win_odd=None, prize_won=None,
+                disqualified_code=None, gallop=None):
+    """A heppa_start row with only the columns this test cares about set."""
+    row = [None] * HEPPA_START_COLUMNS
+    row[0], row[1], row[2], row[3] = meet_date, track_code, race_number, program_number
+    row[5] = horse_id
+    row[13], row[14], row[15] = placement, disqualified_code, gallop
+    row[17], row[21], row[22] = km_time, prize_won, win_odd
     return tuple(row)
 
 
@@ -226,3 +250,190 @@ def test_prev_start_auto_start_from_the_km_suffix_is_not_overwritten(db):
     db.store_prevstarts([tuple(row)])
     db.recompute_auto_starts()
     assert db.conn.execute('SELECT autoStart FROM archive.prev_start').fetchone()[0] is False
+
+
+# --- Heppa merge ------------------------------------------------------------
+#
+# The bridge is positional: (card.meetDate, upper(card.trackAbbreviation),
+# race.number, start.startNumber) against (meetDate, trackCode, raceNumber,
+# programNumber). Every fixture below sets up that join and then asserts on
+# what the recomputes derive across it.
+
+def savonlinna(db, **start_overrides):
+    """The hand-verified Savonlinna 2026-08-08 race 1 shape: one Veikkaus card
+    and race, one start, one Heppa row for the same horse."""
+    db.store_cards([card(1, '2026-08-08', track_abbreviation='SN')])
+    db.store_races([race(10, 1, 1)])
+    db.store_starts([start(10, 9, 'boomer|2021', None, **start_overrides)])
+
+
+def started(db, column):
+    return db.conn.execute(f'SELECT {column} FROM archive.start').fetchone()[0]
+
+
+def test_heppa_fills_a_placement_the_paid_places_never_reached(db):
+    """The whole point: 195,690 starts have no placement because Veikkaus
+    publishes finishing detail only for the runners a pool paid out on."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=7,
+                                       km_time='21,4')])
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') == 7
+    assert started(db, 'kmTime') == '21,4'
+    assert started(db, 'resultSource') == 'heppa'
+
+
+def test_veikkaus_wins_where_it_has_an_answer(db):
+    """Coalesce, never overwrite — the first three keep what the betting
+    operator published, and a disagreement stays queryable rather than lost."""
+    savonlinna(db, placement=1, km_time='18,8', win_odds=444)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=2,
+                                       km_time='19,9', win_odd=999)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') == 1
+    assert started(db, 'kmTime') == '18,8'
+    assert started(db, 'winOddsFinal') == 444
+    assert started(db, 'resultSource') == 'veikkaus'
+
+
+def test_the_heppa_only_columns_are_taken_unconditionally(db):
+    """Veikkaus has no equivalent of any of these — `runner.prize` is career
+    earnings, and there is no disqualification code anywhere in that API."""
+    savonlinna(db, placement=1)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=1,
+                                       prize_won=700, gallop=False)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'prizeWon') == 700
+    assert started(db, 'gallop') is False
+
+
+def test_a_disqualified_horse_keeps_its_code_but_no_placement(db):
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=None,
+                                       disqualified_code='hlo', gallop=True)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') is None
+    assert started(db, 'disqualifiedCode') == 'hlo'
+    assert started(db, 'resultSource') is None
+
+
+def test_the_track_join_is_case_insensitive(db):
+    """Veikkaus writes 'Ku', 'Tk', 'Jo'; Heppa writes 'KU', 'TK', 'JO'."""
+    db.store_cards([card(1, '2026-06-01', track_abbreviation='Ku')])
+    db.store_races([race(10, 1, 3)])
+    db.store_starts([start(10, 5, 'h|2019', None)])
+    db.store_heppa_starts([heppa_start('2026-06-01', 'KU', 3, 5, placement=4)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') == 4
+
+
+def test_a_meeting_with_no_veikkaus_card_touches_nothing(db):
+    """Local and pony meetings have no card at all — they must not fall through
+    onto some other track's start rows."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'PX', 1, 9, placement=3)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') is None
+
+
+def test_the_race_number_is_part_of_the_join(db):
+    """Heats and finals put a horse in two races on one card."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 2, 9, placement=3)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') is None
+
+
+def test_the_registry_id_reaches_the_archive_horse(db):
+    """`horse_key()` is a name-and-year guess; horseId is authoritative."""
+    savonlinna(db)
+    db.store_horses([horse('boomer|2021')])
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9,
+                                       horse_id='7913507947789197818', placement=1)])
+    db.recompute_heppa_links()
+    assert db.conn.execute(
+        'SELECT heppaHorseId FROM archive.horse').fetchone()[0] == '7913507947789197818'
+
+
+def test_horse_key_reaches_a_meeting_only_heppa_covers(db):
+    """A Heppa start carries no birth year, so identity has to travel through
+    the registry id — which is what reaches the local meetings, where there is
+    no archive.start row to join to."""
+    savonlinna(db)
+    db.store_horses([horse('boomer|2021')])
+    db.store_heppa_starts([
+        heppa_start('2026-08-08', 'SN', 1, 9, horse_id='791350', placement=1),
+        heppa_start('2026-07-01', 'PX', 4, 2, horse_id='791350', placement=5)])
+    db.recompute_heppa_links()
+    keys = dict(db.conn.execute(
+        'SELECT meetDate, horseKey FROM archive.heppa_start').fetchall())
+    assert keys == {'2026-08-08': 'boomer|2021', '2026-07-01': 'boomer|2021'}
+
+
+def test_horse_key_does_not_leak_between_horses(db):
+    db.store_cards([card(1, '2026-08-08', track_abbreviation='SN')])
+    db.store_races([race(10, 1, 1)])
+    db.store_starts([start(10, 9, 'boomer|2021', None),
+                     start(10, 3, 'darina|2018', None)])
+    db.store_horses([horse('boomer|2021'), horse('darina|2018')])
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, horse_id='791350'),
+                           heppa_start('2026-08-08', 'SN', 1, 3, horse_id='460574')])
+    db.recompute_heppa_links()
+    assert dict(db.conn.execute(
+        'SELECT horseId, horseKey FROM archive.heppa_start').fetchall()) == {
+            '791350': 'boomer|2021', '460574': 'darina|2018'}
+
+
+def test_the_merge_is_deterministic_however_the_sources_arrive(db):
+    """Both halves are re-derived on every parse, so a re-crawl of either
+    source cannot leave a stale value behind."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=7)])
+    db.recompute_start_from_heppa()
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') == 7
+    assert started(db, 'resultSource') == 'heppa'
+
+
+def test_running_the_merge_twice_does_not_relabel_heppas_own_fill(db):
+    """The merge reads `placement` to decide `resultSource` and writes it in
+    the same statement, so without the reset a second run sees Heppa's fill
+    sitting there and calls it Veikkaus's."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=7)])
+    db.recompute_start_from_heppa()
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') == 7
+    assert started(db, 'resultSource') == 'heppa'
+
+
+def test_withdrawn_heppa_data_is_not_left_behind(db):
+    """The reset is what makes the merge a function of the two tables rather
+    than of everything that has ever been merged into it."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=7,
+                                       prize_won=100)])
+    db.recompute_start_from_heppa()
+    db.conn.execute('DELETE FROM archive.heppa_start')
+    db.recompute_start_from_heppa()
+    assert started(db, 'placement') is None
+    assert started(db, 'prizeWon') is None
+    assert started(db, 'resultSource') is None
+
+
+def test_a_veikkaus_placement_is_labelled_even_with_no_heppa_row(db):
+    savonlinna(db, placement=2)
+    db.recompute_start_from_heppa()
+    assert started(db, 'resultSource') == 'veikkaus'
+
+
+def test_heppa_does_not_touch_the_win_odds(db):
+    """`resultSource` describes where `placement` came from, and one marker
+    cannot honestly describe a column that can come from the odds crawl on the
+    same row. archive.start.winOddsFinal stays purely Veikkaus; Heppa's final
+    odd is in heppa_start.winOdd for cross-checking."""
+    savonlinna(db)
+    db.store_heppa_starts([heppa_start('2026-08-08', 'SN', 1, 9, placement=7,
+                                       win_odd=999)])
+    db.recompute_start_from_heppa()
+    assert started(db, 'winOddsFinal') is None

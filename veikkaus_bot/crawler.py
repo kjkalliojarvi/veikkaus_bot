@@ -20,6 +20,12 @@ from .fetcher import CircuitOpen, Fetcher
 # per-race payloads. next_pending() sorts by (meetDate DESC, stage ASC).
 CARDS_DATE, RACES, RUNNERS, RESULTS, POOLS, ODDS = range(6)
 
+# The manifest is shared with the Heppa crawl (heppa.py), which uses its own
+# endpoint types and its own stage range. next_pending() filters on these so a
+# run of one source never fetches the other's rows — different host, different
+# rate limit, different circuit breaker.
+VEIKKAUS_TYPES = ('cards_date', 'races', 'runners', 'results', 'pools', 'odds')
+
 Task = namedtuple('Task', 'endpointType entityId url rawPath meetDate cardId stage')
 
 CREATE_MANIFEST_TABLE = """
@@ -60,11 +66,14 @@ class Manifest:
         if tasks:
             self.conn.executemany(INSERT_TASK, [tuple(t) for t in tasks])
 
-    def next_pending(self, limit: int) -> list[Task]:
+    def next_pending(self, limit: int, types: tuple = VEIKKAUS_TYPES) -> list[Task]:
+        placeholders = ', '.join('?' * len(types))
         rows = self.conn.execute(
-            """SELECT endpointType, entityId, url, rawPath, meetDate, cardId, stage
-               FROM archive.manifest WHERE status = 'pending'
-               ORDER BY meetDate DESC, stage ASC LIMIT ?""", (limit,)).fetchall()
+            f"""SELECT endpointType, entityId, url, rawPath, meetDate, cardId, stage
+                FROM archive.manifest
+                WHERE status = 'pending' AND endpointType IN ({placeholders})
+                ORDER BY meetDate DESC, stage ASC LIMIT ?""",
+            (*types, limit)).fetchall()
         return [Task(*row) for row in rows]
 
     def mark(self, task: Task, status: str, http_code, error):
@@ -76,10 +85,13 @@ class Manifest:
             (status, http_code, datetime.now().isoformat(timespec='seconds'), error,
              task.endpointType, task.entityId))
 
-    def retry_failed(self) -> int:
+    def retry_failed(self, types: tuple = VEIKKAUS_TYPES) -> int:
+        placeholders = ', '.join('?' * len(types))
+        where = f"status = 'failed' AND endpointType IN ({placeholders})"
         before = self.conn.execute(
-            "SELECT count(*) FROM archive.manifest WHERE status = 'failed'").fetchone()[0]
-        self.conn.execute("UPDATE archive.manifest SET status = 'pending' WHERE status = 'failed'")
+            f'SELECT count(*) FROM archive.manifest WHERE {where}', types).fetchone()[0]
+        self.conn.execute(
+            f"UPDATE archive.manifest SET status = 'pending' WHERE {where}", types)
         return before
 
     def counts(self) -> list[tuple]:
@@ -146,12 +158,16 @@ def expand(task: Task, payload, country: str, with_odds: bool) -> list[Task]:
     return []
 
 
-def crawl(manifest: Manifest, fetcher: Fetcher, country: str, with_odds: bool,
+def crawl(manifest: Manifest, fetcher: Fetcher, expander, types: tuple = VEIKKAUS_TYPES,
           limit: int | None = None) -> int:
-    """Drain the manifest. Returns the number of rows fetched."""
+    """Drain the manifest. Returns the number of rows fetched.
+
+    `expander` is the crawl graph — `(task, payload) -> list[Task]`. The loop
+    itself knows nothing about either API, so the Heppa source reuses it whole.
+    """
     fetched = 0
     while True:
-        batch = manifest.next_pending(50)
+        batch = manifest.next_pending(50, types)
         if not batch:
             return fetched
         for task in batch:
@@ -164,7 +180,7 @@ def crawl(manifest: Manifest, fetcher: Fetcher, country: str, with_odds: bool,
                 continue
             fetcher.store_raw(task.rawPath, result.body)
             try:
-                manifest.enqueue(expand(task, json.loads(result.body), country, with_odds))
+                manifest.enqueue(expander(task, json.loads(result.body)))
             except (ValueError, KeyError) as e:
                 manifest.mark(task, 'failed', result.httpCode, f'expand: {e}')
                 continue
@@ -189,7 +205,9 @@ def backfill(args):
         if args.retry_failed:
             print(f'{manifest.retry_failed()} failed rows reset to pending.')
         try:
-            fetched = crawl(manifest, fetcher, args.country, args.odds, args.limit)
+            fetched = crawl(manifest, fetcher,
+                            lambda t, p: expand(t, p, args.country, args.odds),
+                            VEIKKAUS_TYPES, args.limit)
             print(f'{fetched} responses fetched into {args.raw}.')
         except CircuitOpen as e:
             print(f'Crawl paused: {e}\nRerun the same command to resume.')
