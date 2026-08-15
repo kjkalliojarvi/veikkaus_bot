@@ -23,7 +23,8 @@ Two disagreements are expected and are *not* faults:
 
 Anything else that differs is worth reading before trusting the merged column.
 """
-from .archive_db import DEFAULT_DB, HEPPA_START_BRIDGE, db_ops
+from .archive_db import (DEFAULT_DB, HEPPA_START_BRIDGE, db_ops,
+                         heppa_track_code)
 
 
 # Real Finnish meetings only. The Swedish simulcast cards (trackAbbreviation
@@ -130,16 +131,20 @@ REPORTS = (
         ORDER BY 2 DESC LIMIT 25
     """),
 
-    ('Identity: one registry id resolving to several horseKeys', f"""
-        SELECT h.horseId, count(DISTINCT s.horseKey) AS keys,
-               string_agg(DISTINCT s.horseKey, ' / ') AS which
-        {HEPPA_START_BRIDGE}
-        WHERE h.horseId IS NOT NULL
-        GROUP BY 1 HAVING count(DISTINCT s.horseKey) > 1
-        ORDER BY 2 DESC LIMIT 25
+    # horseKey is deliberately left as the parser computed it, so several keys
+    # per registry id is the *input* to identity resolution, not a fault. What
+    # must be zero is the second column: any id still spanning two canonical
+    # identities after the recompute.
+    ('Identity: one registry id spanning several horseKeys (resolved by canonicalKey)', """
+        SELECT count(*) AS ids_with_several_horseKeys,
+               sum(CASE WHEN canonicals > 1 THEN 1 ELSE 0 END) AS UNRESOLVED_must_be_zero
+        FROM (SELECT heppaHorseId, count(DISTINCT horseKey) AS keys,
+                     count(DISTINCT canonicalKey) AS canonicals
+              FROM archive.horse WHERE heppaHorseId IS NOT NULL
+              GROUP BY 1 HAVING count(DISTINCT horseKey) > 1)
     """),
 
-    ('Meetings only Heppa has, and whether their horses resolved', """
+    ('Meetings only Heppa has, and whether their horses resolved', f"""
         SELECT coalesce(e.eventType, '(unknown)') AS eventType,
                count(DISTINCT h.meetDate || h.trackCode) AS meetings,
                count(*) AS starts,
@@ -148,19 +153,53 @@ REPORTS = (
         LEFT JOIN archive.heppa_event e
                ON e.meetDate = h.meetDate AND e.trackCode = h.trackCode
         LEFT JOIN archive.card ca ON ca.meetDate = h.meetDate
-                                 AND upper(ca.trackAbbreviation) = h.trackCode
+                                 AND {heppa_track_code('ca')} = h.trackCode
         WHERE ca.cardId IS NULL
         GROUP BY 1 ORDER BY 3 DESC
     """),
 
+    # Any row here is a meeting whose results the merge cannot reach. A whole
+    # track showing up is a vocabulary gap, not a crawl gap — that is how the
+    # Hr2/HR alias was found.
     ('Meetings the Veikkaus crawl has but the Heppa crawl has not reached', f"""
-        SELECT substr(ca.meetDate, 1, 4) AS year, count(*) AS cards
+        SELECT ca.trackAbbreviation, min(ca.trackName) AS track, count(*) AS cards,
+               min(ca.meetDate) AS first, max(ca.meetDate) AS last
         FROM archive.card ca
         LEFT JOIN archive.heppa_event e
                ON e.meetDate = ca.meetDate
-              AND e.trackCode = upper(ca.trackAbbreviation)
+              AND e.trackCode = {heppa_track_code('ca')}
         WHERE {REAL_MEETINGS} AND e.meetDate IS NULL
-        GROUP BY 1 ORDER BY 1
+        GROUP BY 1 ORDER BY 3 DESC
+    """),
+
+    # horse_key() is name + birth year, and Veikkaus writes an import's name
+    # inconsistently, so several keys can be one horse. canonicalKey is the
+    # resolved identity: the registry id where there is one, the marker-free
+    # name key otherwise.
+    ('Horse identity: how much did canonicalKey merge?', """
+        SELECT count(*) AS horse_rows,
+               count(DISTINCT canonicalKey) AS distinct_horses,
+               count(*) - count(DISTINCT canonicalKey) AS rows_merged_away,
+               sum(CASE WHEN heppaHorseId IS NOT NULL THEN 1 ELSE 0 END) AS resolved_by_registry_id
+        FROM archive.horse
+    """),
+
+    ('Horse identity: the largest merges, to eyeball', """
+        SELECT canonicalKey, count(*) AS keys,
+               string_agg(horseName || ' b' || coalesce(cast(birthYear AS text), '?'), '  /  ')
+                   AS variants
+        FROM archive.horse GROUP BY 1
+        HAVING count(*) > 1 ORDER BY 2 DESC, 1 LIMIT 15
+    """),
+
+    # The failure mode of the name fallback: two horses of different origin
+    # sharing a base name and a foaling year. Rows here are merges to distrust.
+    ('Horse identity: merged without a registry id to vouch for it', """
+        SELECT canonicalKey, count(*) AS keys,
+               string_agg(horseName || ' b' || coalesce(cast(birthYear AS text), '?'), '  /  ')
+                   AS variants
+        FROM archive.horse WHERE heppaHorseId IS NULL
+        GROUP BY 1 HAVING count(*) > 1 ORDER BY 2 DESC LIMIT 15
     """),
 )
 

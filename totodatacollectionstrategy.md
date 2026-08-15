@@ -307,6 +307,37 @@ went from 3 placings to 11. Two things the comparison exposed that are worth kno
 That 224/224 auto-start agreement is itself a result: it independently confirms that the `a` prefix
 on Heppa's per-horse `distanceCode` means the same thing as `race.startType = 'CAR_START'`.
 
+### 8c. What the full crawl found
+
+The complete 2021→ crawl (68 monthly listings, 2,779 meetings, 31,822 races, no failures) took the
+unplaced non-scratched starts at real Finnish meetings from **177,817 to 34,450**, of which 29,434
+carry a disqualification code — so what is genuinely unknown fell to about **5,000, under 2 %**.
+Over the 72,336 starts where both sources have a placing they agree on **72,320**, and the
+disagreements are all explicable: 16 are post-race disqualifications where Veikkaus records the
+*payout* order and Heppa the *official* one, 106 are km times differing by a tenth on a rounding
+convention, and 173 are late scratchings that the Veikkaus entry data never recorded.
+
+Two defects surfaced that the smoke test was too small to reach, both now fixed:
+
+- **A track-vocabulary gap cost 28 meetings.** Veikkaus spells Härmä `Hr` *and* `Hr2`; Heppa has
+  only `HR`, so `Hr2` upper-cased to `HR2` and matched nothing, stranding 2,116 recoverable
+  placings. The check that missed it asked whether two cards collide on
+  `(date, upper(abbreviation))` — never whether `Hr2` resolved at all. `crosscheck` now groups
+  unmatched cards by track, where a whole track appearing is the signal.
+- **`horse_key()` split 182 horses across 365 keys**, because Veikkaus writes an import's name
+  inconsistently. `archive.horse.canonicalKey` now resolves identity — registry id first, a
+  marker-free name key as fallback.
+
+That second one is where §5's "keep a manual-review table for collisions" is finally answerable, and
+the rule that settles it is a domain fact rather than a heuristic: **a name never repeats within an
+origin country, but it does repeat across them.** `Elliot` and `Elliot (DK)`, both foaled 2016, are
+two real horses, so the country tag is load-bearing wherever it appears — which is exactly why the
+registry id has to decide first and the name fallback is only allowed to carry the horses the
+registry never reached. It also means `heppa_start.horseRegistrationCountry` is the wrong field for
+this: it records where a horse *races* and reads `FI` for both Elliots. Origin lives in
+`/horse/{id}`'s `birthCountry`, which is not crawled — the strongest remaining argument for doing so,
+alongside `registerNo`/UELN, which would end the identity problem outright.
+
 **Heppa does not replace the Veikkaus crawl.** It has no odds history (269,010 `odds_snapshot`
 rows) and no betting percentages (414,457 rows), and its horse-level figures are as-of-now rather
 than as-of-race-day: `horsePriceSum` includes the race being reported, where `careerWinnings` is

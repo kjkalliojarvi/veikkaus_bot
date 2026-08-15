@@ -88,6 +88,8 @@ Everything lands in the `archive` schema of a DuckDB file:
 
 `horse.heppaHorseId` is the registry's id for a horse the archive otherwise knows only by normalised name and birth year. It is resolved positionally, through the races both sources cover, and is the authority when a `horse_key()` collision has to be settled.
 
+**`horseKey` joins, `canonicalKey` identifies.** Veikkaus writes an import's name inconsistently — `Humble Stance`, `Humble Stance* (FR)` and `Humble Stance FR* (FR)` are one horse — so several `horseKey`s can be the same animal. `horse.canonicalKey` is the resolved identity: the registry id where there is one, a marker-free name key otherwise. Every other table still joins on `horseKey`, because that is all a Veikkaus payload can produce, so **group on `canonicalKey` when you want one row per horse.** The registry id deliberately wins over the name, because base names repeat across origin countries even though they never repeat within one.
+
 Both `stat` and `prev_start` ride along only while a card is current, so they stay empty for backfilled years and accumulate from crawling recent dates.
 
 ## How it works

@@ -1,13 +1,14 @@
 import pytest
 
 from veikkaus_bot.models import HeppaStart, Runner
-from veikkaus_bot.parse import (_captured_at, betpercentage_records,
+from veikkaus_bot.parse import (_captured_at, base_horse_key, betpercentage_records,
                                 heppa_start_record, horse_key, is_placeholder,
                                 normalize_name, parse_heppa_auto_start,
                                 parse_heppa_int, parse_heppa_km_time,
                                 parse_heppa_odds, parse_km_time, parse_meet_date,
                                 parse_placing, parse_result, parse_tote_result,
-                                parse_win_odd, prevstart_records, stat_records)
+                                parse_win_odd, prevstart_records, stat_records,
+                                strip_import_markers)
 
 
 def make_runner(**overrides):
@@ -356,3 +357,68 @@ def test_heppa_start_record_survives_a_payload_with_only_the_identifying_fields(
     assert (row['meetDate'], row['trackCode'], row['raceNumber'],
             row['programNumber']) == ('2005-06-15', 'S', 3, 4)
     assert row['placement'] is None
+
+
+# --- import markers and the fallback identity --------------------------------
+#
+# All of these are real names from the archive. The trailing token is a country
+# marker only when it agrees with the tag; otherwise it is a stable suffix and
+# part of the name.
+
+@pytest.mark.parametrize('name, expected', [
+    # Country letter agreeing with the tag — an import marker, dropped.
+    ('Morell S (SE)', 'Morell'),
+    ('Frozen Elsa S (SE)', 'Frozen Elsa'),
+    ('Touch the Clouds S (SE)', 'Touch the Clouds'),
+    ('Black Swan N (NO)', 'Black Swan'),
+    ('Harley D (DE)', 'Harley'),
+    ('Hurriganes DK (DK)', 'Hurriganes'),
+    ('Twentyfourseven DE* (DE)', 'Twentyfourseven'),
+    ('The Next One US (US)', 'The Next One'),
+    ('Humble Stance FR* (FR)', 'Humble Stance'),
+    # Tag alone, nothing to drop beyond it.
+    ('Humble Stance* (FR)', 'Humble Stance'),
+    ('Kapplans Orlando (SE)', 'Kapplans Orlando'),
+    # Stable suffixes: they disagree with the tag, so they stay.
+    ('Birbone OK (IT)', 'Birbone OK'),
+    ('Vulcano OP (IT)', 'Vulcano OP'),
+    ('Giovy LJ (IT)', 'Giovy LJ'),
+    ('Tako ÖK* (NO)', 'Tako ÖK'),
+    ('A RM (RU)', 'A RM'),
+    ('Let it be VP* (NL)', 'Let it be VP'),
+    ("Aurelia's Pearl KS* (FI)", "Aurelia's Pearl KS"),
+    ('Isola L C (DK)', 'Isola L C'),
+    # 'S' against a US tag is not a country marker for that tag.
+    ('Sweet Game S (US)', 'Sweet Game S'),
+    # No tag to agree with, so nothing is stripped.
+    ('Remington XO', 'Remington XO'),
+    ('Pompom S*', 'Pompom S*'),
+    ('Gripen S', 'Gripen S'),
+    ('Lumi-Urho', 'Lumi-Urho'),
+])
+def test_strip_import_markers(name, expected):
+    assert strip_import_markers(name) == expected
+
+
+def test_base_horse_key_folds_the_ways_veikkaus_writes_one_import():
+    """'Humble Stance' arrives three ways across cards; they are one horse."""
+    keys = {base_horse_key(n, 2017) for n in
+            ('Humble Stance*', 'Humble Stance* (FR)', 'Humble Stance FR* (FR)')}
+    assert len(keys) == 1
+
+
+def test_base_horse_key_still_separates_birth_years():
+    assert base_horse_key('Consta', 2019) != base_horse_key('Consta', 2021)
+
+
+def test_base_horse_key_does_not_merge_on_a_stable_suffix():
+    """'Birbone OK' and a hypothetical 'Birbone' are different horses."""
+    assert base_horse_key('Birbone OK (IT)', 2017) != base_horse_key('Birbone (IT)', 2017)
+
+
+def test_base_horse_key_loses_the_origin_that_horse_key_keeps():
+    """The documented cost of the fallback: 'Elliot' and 'Elliot (DK)', both
+    foaled 2016, are two real horses and this cannot tell them apart. Only the
+    registry id can, which is why RECOMPUTE_HORSE_IDENTITY prefers it."""
+    assert horse_key('Elliot', 2016) != horse_key('Elliot (DK)', 2016)
+    assert base_horse_key('Elliot', 2016) == base_horse_key('Elliot (DK)', 2016)

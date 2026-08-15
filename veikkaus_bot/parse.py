@@ -41,9 +41,56 @@ def horse_key(name: str, birth_year: int | None) -> str:
 
     The API exposes no registration number, so identity is name + birth year.
     Collisions are possible and Hippos's Heppa registry is the authority when
-    one has to be resolved.
+    one has to be resolved — `archive.horse.heppaHorseId` now carries it, and
+    `canonicalKey` says which of these keys are one horse.
     """
     return f'{normalize_name(name)}|{birth_year if birth_year else ""}'
+
+
+COUNTRY_TAG_RE = re.compile(r'\s*\(([a-z]{2,3})\)\s*$', re.IGNORECASE)
+
+
+def strip_import_markers(name: str) -> str:
+    """Drop the import markers Veikkaus writes inconsistently.
+
+    The same horse arrives as 'Humble Stance', 'Humble Stance* (FR)' and
+    'Humble Stance FR* (FR)'. Two markers are in play: a parenthesised country
+    tag, and the country letter that the Nordic convention appends to an
+    import's registered name ('Morell S (SE)', 'Black Swan N (NO)').
+
+    The trailing token is only removed when it *agrees* with the tag — equal to
+    it, or its first letter. That is what tells a country marker apart from a
+    stable suffix, and those are common and are genuinely part of the name:
+    'Birbone OK (IT)', 'Vulcano OP (IT)', 'Remington XO', "Aurelia's Pearl KS".
+    Stripping a trailing letter unconditionally would merge horses that only
+    share a stem.
+
+    A token with no tag to agree with is therefore kept — 'Pompom S*' stays
+    distinct from 'Pompom* (SE)' here. That pair is one horse, but it is the
+    registry id that says so, not this function.
+    """
+    match = COUNTRY_TAG_RE.search(name)
+    if not match:
+        return name
+    tag = match.group(1).upper()
+    stem = name[:match.start()].replace('*', '').strip()
+    parts = stem.split()
+    if len(parts) > 1:
+        last = parts[-1].upper()
+        if last == tag or (len(last) == 1 and tag.startswith(last)):
+            stem = ' '.join(parts[:-1])
+    return stem
+
+
+def base_horse_key(name: str, birth_year: int | None) -> str:
+    """Horse identity with the import markers removed (strategy §5).
+
+    Only used where no registry id reached the horse — see
+    archive_db.RECOMPUTE_HORSE_IDENTITY, which prefers the id precisely because
+    base names *can* repeat across origin countries even though they never
+    repeat within one.
+    """
+    return horse_key(strip_import_markers(name), birth_year)
 
 
 def parse_km_time(text: str | None) -> tuple[int | None, bool]:
@@ -251,7 +298,9 @@ def horse_record(runner: Runner) -> tuple:
             runner.sire,
             runner.dam,
             runner.damSire,
-            None)    # heppaHorseId — see archive_db.RECOMPUTE_HEPPA_HORSE_ID
+            None,    # heppaHorseId — see archive_db.RECOMPUTE_HEPPA_HORSE_ID
+            base_horse_key(runner.horseName, birth_year(runner)),
+            None)    # canonicalKey — see archive_db.RECOMPUTE_HORSE_IDENTITY
 
 
 def start_record(runner: Runner, result: dict | None, win_odds: int | None) -> tuple:

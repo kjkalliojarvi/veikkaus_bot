@@ -186,3 +186,7 @@ data/raw/
 
 
 
+
+# Bulk data: raw-zone archives and macOS cruft
+*.tar.gz
+.DS_Store

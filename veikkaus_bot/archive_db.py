@@ -63,6 +63,11 @@ INSERT_RACE = ('INSERT OR REPLACE INTO archive.race '
                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
 RACE_KEY = (0,)  # raceId
 
+# `horseKey` stays the key every other table joins on — it is what the parser
+# can compute from a Veikkaus payload alone. `canonicalKey` is the identity to
+# *group* by: the registry knows that several horseKeys are one horse, and
+# RECOMPUTE_HORSE_IDENTITY writes that down. Analysis wanting one row per horse
+# should group on canonicalKey, not horseKey.
 CREATE_HORSE_TABLE = """
     CREATE TABLE IF NOT EXISTS archive.horse(
         horseKey TEXT,
@@ -73,9 +78,11 @@ CREATE_HORSE_TABLE = """
         dam TEXT,
         damSire TEXT,
         heppaHorseId TEXT,       -- Hippos's registry id; recomputed, see below
+        baseKey TEXT,            -- name key with the import markers removed
+        canonicalKey TEXT,       -- the horseKey that stands for this horse
         PRIMARY KEY (horseKey));
 """
-INSERT_HORSE = 'INSERT OR REPLACE INTO archive.horse VALUES (?, ?, ?, ?, ?, ?, ?, ?);'
+INSERT_HORSE = 'INSERT OR REPLACE INTO archive.horse VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 HORSE_KEY = (0,)  # horseKey
 
 # One row per (race, horse) — one past-performance line.
@@ -452,12 +459,30 @@ RECOMPUTE_START_INTERVAL = """
 # (trackAbbreviation ending '-V') and the Veikkaus combination-pool meta-cards
 # (MM, KUN, CIT, T75, Sl, JAA) — neither is a real meeting and neither has a
 # Heppa counterpart by design.
+# Veikkaus writes Härmä two ways — 'Hr' (Härmä Powerpark) and 'Hr2' (Härmä),
+# both trackNumber 37 — while Heppa has only 'HR'. Upper-casing alone therefore
+# leaves 'HR2', which matches nothing, and it silently cost 28 meetings: 28 Hr2
+# cards and 28 otherwise-unmatched HR meetings, on exactly the same 28 dates,
+# with nothing left over on either side. 'Hr' and 'Hr2' never fall on the same
+# date, so folding both onto 'HR' cannot make a meeting ambiguous.
+#
+# Kept as an explicit alias rather than a rule like "strip trailing digits":
+# this is one quirk of one operator's vocabulary, not a pattern.
+HEPPA_TRACK_ALIASES = {'HR2': 'HR'}
+
+
+def heppa_track_code(alias: str = 'ca') -> str:
+    """SQL mapping a card's trackAbbreviation onto Heppa's trackCode."""
+    whens = ' '.join(f"WHEN '{k}' THEN '{v}'" for k, v in HEPPA_TRACK_ALIASES.items())
+    return f'CASE upper({alias}.trackAbbreviation) {whens} ELSE upper({alias}.trackAbbreviation) END'
+
+
 # The bridge itself, kept separate so that `crosscheck.py` validates the very
 # join the merge relies on rather than a hand-copied lookalike.
-HEPPA_START_BRIDGE = """
+HEPPA_START_BRIDGE = f"""
     FROM archive.heppa_start h
     JOIN archive.card ca ON ca.meetDate = h.meetDate
-                        AND upper(ca.trackAbbreviation) = h.trackCode
+                        AND {heppa_track_code('ca')} = h.trackCode
     JOIN archive.race r ON r.cardId = ca.cardId AND r.number = h.raceNumber
     JOIN archive.start s ON s.raceId = r.raceId AND s.startNumber = h.programNumber
 """
@@ -495,6 +520,33 @@ RECOMPUTE_HEPPA_START_HORSEKEY = """
           FROM archive.horse WHERE heppaHorseId IS NOT NULL
           GROUP BY heppaHorseId) AS k
     WHERE k.heppaHorseId = h.horseId;
+"""
+
+# Which horseKeys are actually one horse.
+#
+# `horse_key()` is name + birth year, and Veikkaus writes an import's name
+# inconsistently — 'Humble Stance', 'Humble Stance* (FR)' and
+# 'Humble Stance FR* (FR)' are one horse under one registry id. That split 182
+# horses across 365 keys.
+#
+# The registry id decides wherever we have one, and `baseKey` only has to carry
+# the horses it does not reach. That order matters: base names collide across
+# origin countries — 'Elliot' and 'Elliot (DK)', both foaled 2016, are two real
+# horses — and grouping by the id first means the name fallback never gets the
+# chance to merge them. Names never repeat *within* an origin country, so for a
+# horse with no registry id the base name plus birth year is the best available
+# identity, and `base_horse_key()` is deliberately conservative about what it
+# strips.
+#
+# min() picks the representative so the column is deterministic.
+RECOMPUTE_HORSE_IDENTITY = """
+    UPDATE archive.horse AS h
+    SET canonicalKey = m.canonicalKey
+    FROM (SELECT coalesce(heppaHorseId, baseKey, horseKey) AS identity,
+                 min(horseKey) AS canonicalKey
+          FROM archive.horse
+          GROUP BY 1) AS m
+    WHERE coalesce(h.heppaHorseId, h.baseKey, h.horseKey) = m.identity;
 """
 
 # The payoff: the whole field's finishing detail, merged into archive.start —
@@ -571,6 +623,8 @@ ADD_COLUMNS = (
     'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS gallop BOOLEAN;',
     'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS resultSource TEXT;',
     'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS heppaHorseId TEXT;',
+    'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS baseKey TEXT;',
+    'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS canonicalKey TEXT;',
 )
 
 
@@ -673,6 +727,7 @@ class ArchiveDb:
         """
         self.conn.execute(RECOMPUTE_HEPPA_HORSE_ID)
         self.conn.execute(RECOMPUTE_HEPPA_START_HORSEKEY)
+        self.conn.execute(RECOMPUTE_HORSE_IDENTITY)
 
     def recompute_start_from_heppa(self):
         """Merge the registry's finishing detail into archive.start.

@@ -41,9 +41,10 @@ def card(card_id, meet_date, track_abbreviation=None):
     return tuple(row)
 
 
-def horse(horse_key):
+def horse(horse_key, base_key=None, name=None):
     row = [None] * HORSE_COLUMNS
-    row[0] = horse_key
+    row[0], row[1] = horse_key, name
+    row[8] = base_key if base_key is not None else horse_key
     return tuple(row)
 
 
@@ -437,3 +438,79 @@ def test_heppa_does_not_touch_the_win_odds(db):
                                        win_odd=999)])
     db.recompute_start_from_heppa()
     assert started(db, 'winOddsFinal') is None
+
+
+# --- track vocabulary --------------------------------------------------------
+
+def test_harma_is_matched_under_both_veikkaus_spellings(db):
+    """Veikkaus writes Härmä as 'Hr' and 'Hr2'; Heppa has only 'HR'. Upper-casing
+    alone leaves 'HR2', which matched nothing and silently cost 28 meetings."""
+    db.store_cards([card(1, '2023-06-23', track_abbreviation='Hr2'),
+                    card(2, '2023-07-01', track_abbreviation='Hr')])
+    db.store_races([race(10, 1, 4), race(20, 2, 4)])
+    db.store_starts([start(10, 3, 'a|2019', None), start(20, 3, 'b|2019', None)])
+    db.store_heppa_starts([heppa_start('2023-06-23', 'HR', 4, 3, placement=6),
+                           heppa_start('2023-07-01', 'HR', 4, 3, placement=7)])
+    db.recompute_start_from_heppa()
+    assert dict(db.conn.execute(
+        'SELECT raceId, placement FROM archive.start').fetchall()) == {10: 6, 20: 7}
+
+
+# --- horse identity ----------------------------------------------------------
+
+def identities(db):
+    return dict(db.conn.execute(
+        'SELECT horseKey, canonicalKey FROM archive.horse').fetchall())
+
+
+def test_keys_sharing_a_registry_id_resolve_to_one_horse(db):
+    """Veikkaus writes an import's name three ways; the registry says it is one
+    horse. That split 182 horses across 365 keys before this."""
+    db.store_horses([horse('humble stance|2017', base_key='humble stance|2017'),
+                     horse('humble stance (fr)|2017', base_key='humble stance|2017'),
+                     horse('humble stance fr (fr)|2017', base_key='humble stance|2017')])
+    db.conn.execute("UPDATE archive.horse SET heppaHorseId = '754090'")
+    db.recompute_heppa_links()
+    assert len(set(identities(db).values())) == 1
+
+
+def test_the_registry_id_wins_over_a_matching_base_name(db):
+    """'Elliot' and 'Elliot (DK)', both foaled 2016, share a base name and are
+    two real horses. Grouping by the id first means the name fallback never gets
+    the chance to merge them."""
+    db.store_horses([horse('elliot|2016', base_key='elliot|2016'),
+                     horse('elliot (dk)|2016', base_key='elliot|2016')])
+    db.conn.execute("UPDATE archive.horse SET heppaHorseId = '400255' WHERE horseKey = 'elliot|2016'")
+    db.conn.execute("UPDATE archive.horse SET heppaHorseId = '486517' WHERE horseKey = 'elliot (dk)|2016'")
+    db.recompute_heppa_links()
+    assert len(set(identities(db).values())) == 2
+
+
+def test_the_base_name_carries_horses_the_registry_never_reached(db):
+    db.store_horses([horse('lerin|2015', base_key='lerin|2015'),
+                     horse('lerin (se)|2015', base_key='lerin|2015')])
+    db.recompute_heppa_links()
+    assert len(set(identities(db).values())) == 1
+
+
+def test_identity_does_not_merge_different_horses(db):
+    db.store_horses([horse('consta|2019', base_key='consta|2019'),
+                     horse('consta|2021', base_key='consta|2021')])
+    db.recompute_heppa_links()
+    assert len(set(identities(db).values())) == 2
+
+
+def test_identity_is_deterministic_whatever_the_insert_order(db):
+    rows = [horse('b (se)|2017', base_key='b|2017'), horse('b|2017', base_key='b|2017')]
+    db.store_horses(rows)
+    db.recompute_heppa_links()
+    first = identities(db)
+    db.store_horses(list(reversed(rows)))
+    db.recompute_heppa_links()
+    assert identities(db) == first
+
+
+def test_every_horse_gets_an_identity_even_with_no_base_key(db):
+    db.conn.execute("INSERT INTO archive.horse (horseKey) VALUES ('orphan|2020')")
+    db.recompute_heppa_links()
+    assert identities(db) == {'orphan|2020': 'orphan|2020'}
