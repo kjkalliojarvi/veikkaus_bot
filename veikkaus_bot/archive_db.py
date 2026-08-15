@@ -355,6 +355,61 @@ INSERT_HEPPA_START = ('INSERT OR REPLACE INTO archive.heppa_start VALUES '
                       '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
 HEPPA_START_KEY = (0, 1, 2, 3)  # meetDate, trackCode, raceNumber, programNumber
 
+# The registry's record of the animal rather than of a race — one row per
+# horse, from `/horse/{horseId}`. Nothing in it is time-varying, so unlike the
+# `/horse/{id}/stats` endpoint (deliberately not crawled) it cannot leak a
+# result into an as-of-race-day feature.
+#
+# `registerNo`/`ueln` is what the Veikkaus API has no equivalent of at all, and
+# unlike `horseId` it means something outside Heppa: UELN is international, so
+# it is the join to any other registry.
+#
+# `birthCountry` is the origin the country tag in a Veikkaus horse name is
+# gesturing at. Note it is not `registrationCountry`, which says where a horse
+# races and reads 'FI' for any import — the distinction that makes
+# `heppa_start.horseRegistrationCountry` the wrong field for identity work.
+CREATE_HEPPA_HORSE_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.heppa_horse(
+        horseId TEXT,
+        horseName TEXT,
+        birthDate TEXT,          -- exact, where archive.horse has only a year
+        birthDateAccurate BOOLEAN,
+        registerNo TEXT,
+        ueln TEXT,               -- international; the cross-registry join key
+        chipNo TEXT,
+        dead BOOLEAN,
+        registrationSuspended BOOLEAN,
+        species TEXT,
+        breedCode TEXT,
+        breedFinName TEXT,
+        gender TEXT,
+        color TEXT,
+        birthCountry TEXT,       -- origin
+        birthCountryName TEXT,
+        birthPlace TEXT,
+        origin TEXT,
+        registrationCountry TEXT,  -- where it races; not the origin
+        breedingUnion TEXT,
+        breederName TEXT,
+        ownerName TEXT,
+        trainerId TEXT,
+        trainerName TEXT,
+        homeTrackName TEXT,
+        homeTrackCity TEXT,
+        bestRecord TEXT,
+        sireId TEXT,
+        sireName TEXT,
+        sireRegisterNo TEXT,
+        damId TEXT,
+        damName TEXT,
+        damRegisterNo TEXT,
+        PRIMARY KEY (horseId));
+"""
+INSERT_HEPPA_HORSE = ('INSERT OR REPLACE INTO archive.heppa_horse VALUES '
+                      '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
+                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+HEPPA_HORSE_KEY = (0,)  # horseId
+
 # The prev-start block names a driver but never a trainer, so the trainer at
 # the time of a past start has to come from the archive itself: the crawled
 # `archive.start` row for that same race, which recorded the trainer as of that
@@ -665,7 +720,7 @@ def create(conn):
                       CREATE_START_TABLE, CREATE_ODDS_TABLE, CREATE_STAT_TABLE,
                       CREATE_BETPERCENTAGE_TABLE, CREATE_PREVSTART_TABLE,
                       CREATE_HEPPA_EVENT_TABLE, CREATE_HEPPA_RACE_TABLE,
-                      CREATE_HEPPA_START_TABLE,
+                      CREATE_HEPPA_START_TABLE, CREATE_HEPPA_HORSE_TABLE,
                       *ADD_COLUMNS, *CREATE_INDEXES):
         conn.execute(statement)
 
@@ -708,6 +763,9 @@ class ArchiveDb:
 
     def store_heppa_starts(self, rows):
         _insert_many(self.conn, INSERT_HEPPA_START, rows, HEPPA_START_KEY)
+
+    def store_heppa_horses(self, rows):
+        _insert_many(self.conn, INSERT_HEPPA_HORSE, rows, HEPPA_HORSE_KEY)
 
     def recompute_start_intervals(self):
         self.conn.execute(RECOMPUTE_START_INTERVAL)

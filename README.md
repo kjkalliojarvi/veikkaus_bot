@@ -17,7 +17,8 @@ uv sync
 
 ```bash
 uv run veikkaus backfill --from 2021-01-01  # crawl Veikkaus into data/raw/
-uv run veikkaus heppa --from 2021-01-01     # crawl Heppa into data/raw/
+uv run veikkaus heppa --from 2021-01-01     # crawl Heppa meetings into data/raw/
+uv run veikkaus heppa-horses                # one registry record per horse
 uv run veikkaus status                      # how far both got
 uv run veikkaus parse                       # raw/ -> archive.* tables
 uv run veikkaus crosscheck                  # do the two sources agree?
@@ -43,6 +44,16 @@ uv run veikkaus heppa --from 2026-08-08 --to 2026-08-08   # one day, to try it
 The scope is every Finnish meeting, including the local (`PAIKALLISRAVI`) and pony (`PONI`) racing that the Veikkaus API never reports — real starts in a horse's career that would otherwise be invisible. `heppa.hippos.fi/robots.txt` disallows `/heppa/racing`, `/heppa/horse` and `/heppa/person`, and says nothing about the `/heppa2_backend` endpoints this reads; the crawl is single-threaded at the same delay regardless.
 
 The two sources are complementary, not interchangeable. Heppa has no odds history and no betting percentages, and its horse-level figures are as-of-now rather than as-of-race-day — `horsePriceSum` is career earnings *including* the race being reported, where Veikkaus's `careerWinnings` is the pre-race figure. Keep crawling both.
+
+### The horse registry
+
+`heppa-horses` fetches one `/horse/{id}` record per horse the meetings crawl turned up — **14,050 requests, ~7.8 h**. It is driven by the archive rather than by a date window, so run it after `heppa` and `parse`; re-running it later costs only the horses that are new.
+
+It brings what neither the Veikkaus API nor the results endpoints carry: `registerNo` and **`ueln`** (international, so the join key to any other registry), an *exact* `birthDate` where `archive.horse` has only a year, breeder, colour and breed, and `sireId`/`damId` — a pedigree graph with stable ids instead of the name strings `archive.horse` holds.
+
+**`birthCountry` is origin; `registrationCountry` is where the horse races**, and they differ for every import. That distinction is the one `heppa_start.horseRegistrationCountry` cannot make.
+
+It does **not** improve horse-identity resolution, despite appearances: 5,232 of the 5,235 horses without a registry id race only on the Swedish simulcast and combination-pool cards, and Heppa is the Finnish registry — there is no record of them to fetch. `/horse/{id}/stats` is deliberately not crawled either; it is as-of-now and would leak results into any as-of-race-day feature.
 
 ### Cross-checking
 
@@ -80,6 +91,7 @@ Everything lands in the `archive` schema of a DuckDB file:
 | `heppa_event` | race meeting in the Heppa registry, incl. track condition and temperature |
 | `heppa_race` | race in the Heppa registry |
 | `heppa_start` | (race, horse) as the registry recorded it — the whole field |
+| `heppa_horse` | horse in the registry — UELN, exact birth date, origin, breeding |
 | `manifest` | planned fetch — the crawl ledger, for both sources |
 
 `start` and `prev_start` come from the same payload but answer different questions. The results endpoint publishes finishing detail only for the first three home, so `start.placement` and `start.kmTime` are NULL for the rest of the field. `prev_start` — each horse's own career line, riding along inside the runners payload — has no such cap: it carries a finishing position for the whole field (observed to 16th) plus the Finnish outcome codes for qualifying, retired and disqualified starts. Crawling the calendar therefore reconstructs full finishing orders retrospectively, for every horse that started again. See §2b of the strategy document.

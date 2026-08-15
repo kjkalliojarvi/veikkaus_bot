@@ -8,6 +8,7 @@ from .crawler import backfill, status
 from .crosscheck import crosscheck
 from .fetcher import DEFAULT_DELAY
 from .heppa import backfill as heppa_backfill
+from .heppa import backfill_horses as heppa_horses
 from .parse import parse
 
 DEFAULT_RAW = 'data/raw'
@@ -71,6 +72,22 @@ def veikkaus():
     parser_heppa.add_argument('--retry-failed', action='store_true',
                               help='Reset failed manifest rows to pending before crawling')
     parser_heppa.set_defaults(func=heppa_backfill)
+
+    parser_hhorses = subparser.add_parser(
+        'heppa-horses',
+        help="Crawl the Heppa registry record of every horse the meetings turned up "
+             "(run after `heppa` and `parse`)")
+    parser_hhorses.add_argument('--raw', default=DEFAULT_RAW,
+                                help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_hhorses.add_argument('--db', default=DEFAULT_DB,
+                                help=f'DuckDB database holding the manifest (default: {DEFAULT_DB})')
+    parser_hhorses.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                                help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    parser_hhorses.add_argument('--limit', type=int, default=None,
+                                help='Stop after N fetches (for a trial run)')
+    parser_hhorses.add_argument('--retry-failed', action='store_true',
+                                help='Reset failed manifest rows to pending before crawling')
+    parser_hhorses.set_defaults(func=heppa_horses)
 
     parser_parse = subparser.add_parser(
         'parse', help='Parse the raw archive into the archive.* tables')

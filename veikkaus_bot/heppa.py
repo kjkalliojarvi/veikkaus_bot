@@ -21,6 +21,7 @@ but the crawl stays single-threaded at the same delay regardless.
 """
 from datetime import date, datetime, timedelta
 
+from . import archive_db
 from .archive_db import db_ops
 from .crawler import Manifest, Task, crawl
 from .fetcher import CircuitOpen, Fetcher
@@ -29,9 +30,14 @@ from .models import HEPPA_URL
 
 # Stages sit above crawler.py's 0-5 so both sources can share one manifest and
 # still order sensibly within a date. Meetings before races, as there.
-HEPPA_RESULTS, HEPPA_RACES, HEPPA_START = 10, 11, 12
+HEPPA_RESULTS, HEPPA_RACES, HEPPA_START, HEPPA_HORSE = 10, 11, 12, 13
 
+# The two Heppa crawls are separate opt-ins and drain separately: the meetings
+# crawl is driven by a date window, the horse crawl by what the meetings turned
+# up. Keeping them apart is what stops `heppa` from silently starting an eight-
+# hour horse crawl on the back of a one-day results run.
 HEPPA_TYPES = ('heppa_results', 'heppa_races', 'heppa_start')
+HEPPA_HORSE_TYPES = ('heppa_horse',)
 
 
 def months(start: date, end: date) -> list[tuple[date, date]]:
@@ -83,6 +89,28 @@ def _start_task(meet_date: str, track_code: str, race_number: str) -> Task:
                 meet_date, None, HEPPA_START)
 
 
+def horse_task(horse_id: str) -> Task:
+    """One horse's registry record.
+
+    Sharded on the last two digits of the id: 14,050 horses in one directory
+    is not fatal, but it is unpleasant to work with and the shard costs
+    nothing. A horse has no meet date, so the `meetDate` column stays NULL —
+    ordering is meaningless here and resumption comes from the manifest status.
+    """
+    return Task('heppa_horse', horse_id, f'/horse/{horse_id}',
+                f'heppa/horse/{horse_id[-2:]}/{horse_id}.json.gz',
+                None, None, HEPPA_HORSE)
+
+
+# The horse ids the meetings crawl turned up. Read from the archive rather than
+# from the raw zone, so this reflects what `parse` has actually loaded — which
+# is also why it has to run after `heppa` and `parse`, not alongside them.
+HORSE_IDS = """
+    SELECT DISTINCT horseId FROM archive.heppa_start
+    WHERE horseId IS NOT NULL ORDER BY horseId
+"""
+
+
 def expand(task: Task, payload) -> list[Task]:
     """The children a fetched response implies.
 
@@ -127,6 +155,37 @@ def backfill(args):
             print(f'{manifest.retry_failed(HEPPA_TYPES)} failed rows reset to pending.')
         try:
             fetched = crawl(manifest, fetcher, expand, HEPPA_TYPES, args.limit)
+            print(f'{fetched} responses fetched into {args.raw}.')
+        except CircuitOpen as e:
+            print(f'Crawl paused: {e}\nRerun the same command to resume.')
+        for row in manifest.counts():
+            print('  {:<14} {:<8} {}'.format(*row))
+
+
+def backfill_horses(args):
+    """CLI handler: crawl the registry record of every horse already seen.
+
+    Driven by the archive rather than by a date window, so it has to follow a
+    `heppa` crawl and a `parse`. Re-running it after a later crawl picks up the
+    new horses and skips the rest — `INSERT OR IGNORE` makes re-enqueueing a
+    no-op.
+    """
+    fetcher = Fetcher(args.raw, args.delay, base_url=HEPPA_URL)
+    with db_ops(args.db) as conn:
+        manifest = Manifest(conn)
+        manifest.create()
+        archive_db.create(conn)
+        ids = [row[0] for row in conn.execute(HORSE_IDS).fetchall()]
+        if not ids:
+            print('No horse ids in the archive yet.\n'
+                  'Run `veikkaus heppa --from D` and then `veikkaus parse` first.')
+            return
+        print(f'{len(ids)} horses known; already-fetched ones are skipped.')
+        manifest.enqueue([horse_task(horse_id) for horse_id in ids])
+        if args.retry_failed:
+            print(f'{manifest.retry_failed(HEPPA_HORSE_TYPES)} failed rows reset to pending.')
+        try:
+            fetched = crawl(manifest, fetcher, expand, HEPPA_HORSE_TYPES, args.limit)
             print(f'{fetched} responses fetched into {args.raw}.')
         except CircuitOpen as e:
             print(f'Crawl paused: {e}\nRerun the same command to resume.')

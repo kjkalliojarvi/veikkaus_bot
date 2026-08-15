@@ -272,6 +272,70 @@ class HeppaRaceEntry(BaseModel):
     intermediateTime: Optional[str] = None
 
 
+class HeppaHorse(BaseModel):
+    """A horse in the registry, from `/horse/{horseId}`.
+
+    Everything here is a property of the animal rather than of a race, so
+    nothing in it is time-varying and none of it can leak a result — unlike
+    `/horse/{id}/stats`, which is as-of-now and is deliberately not crawled.
+
+    `registerNo`/`ueln` is the identifier the Veikkaus API has no equivalent
+    of at all, and unlike `horseId` it is meaningful outside Heppa: UELN is
+    international, so it is the join to any other registry.
+
+    `sire` and `dam` are nested `{id, name, registerNo, ...}` objects, kept as
+    dicts here and flattened in parse.py — one generation, which is what this
+    endpoint carries. `/horse/{id}/pedigree` goes back three and is a separate
+    crawl.
+    """
+    id: str
+    name: Optional[str] = None
+    birthDate: Optional[str] = None        # yyyy-mm-dd; exact, unlike birthYear
+    birthDateStr: Optional[str] = None
+    birthDateAccurate: Optional[bool] = None
+    registerNo: Optional[str] = None
+    ueln: Optional[str] = None
+    chipNo: Optional[str] = None
+    dead: Optional[bool] = None
+    registrationSuspended: Optional[bool] = None
+    species: Optional[str] = None
+    breedCode: Optional[str] = None
+    breedFinName: Optional[str] = None
+    gender: Optional[str] = None
+    color: Optional[str] = None            # a plain string here, a dict on Runner
+    birthCountry: Optional[str] = None     # origin — NOT registrationCountry
+    birthCountryName: Optional[str] = None
+    birthPlace: Optional[str] = None
+    origin: Optional[str] = None
+    registrationCountry: Optional[str] = None   # where it races, not where it is from
+    breedingUnion: Optional[str] = None
+    breederName: Optional[str] = None
+    ownerName: Optional[str] = None
+    groomName: Optional[str] = None
+    trainerId: Optional[str] = None
+    trainerName: Optional[str] = None
+    homeTrackName: Optional[str] = None
+    homeTrackCity: Optional[str] = None
+    bestRecord: Optional[str] = None
+    sire: Optional[dict] = None
+    dam: Optional[dict] = None
+    # Modelled to document the payload, never persisted: `age` and
+    # `latestVaccination` are as-of-now, the rest is decoration.
+    age: Optional[str] = None
+    latestVaccination: Optional[str] = None
+    laboratoryNumber: Optional[str] = None
+    dnaCertificate: Optional[bool] = None
+    description: Optional[str] = None
+    victorySong: Optional[str] = None
+    photo: Optional[dict] = None
+    chipNo2: Optional[str] = None
+    racingRenterName: Optional[str] = None
+    owningRenterName: Optional[str] = None
+    breedingRenterName: Optional[str] = None
+    tryOutPointsWithPause: Optional[str] = None
+    tryOutPointsWithoutPause: Optional[str] = None
+
+
 class HeppaStart(BaseModel):
     """One horse in one race, from `/race/{date}/{trackCode}/start/{raceNo}`.
 

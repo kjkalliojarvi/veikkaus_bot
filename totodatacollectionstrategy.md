@@ -335,8 +335,32 @@ two real horses, so the country tag is load-bearing wherever it appears — whic
 registry id has to decide first and the name fallback is only allowed to carry the horses the
 registry never reached. It also means `heppa_start.horseRegistrationCountry` is the wrong field for
 this: it records where a horse *races* and reads `FI` for both Elliots. Origin lives in
-`/horse/{id}`'s `birthCountry`, which is not crawled — the strongest remaining argument for doing so,
-alongside `registerNo`/UELN, which would end the identity problem outright.
+`/horse/{id}`'s `birthCountry`.
+
+### 8d. The horse registry
+
+`veikkaus heppa-horses` crawls `/horse/{horseId}` once per horse the meetings turned up — **14,050
+requests, ~7.8 h** — into `archive.heppa_horse`. It is driven by the archive rather than by a date
+window, so it follows a `heppa` crawl and a `parse`, and re-running it later costs only the new
+horses.
+
+It closes §5's remaining gap on breeding rather than on identity: `registerNo` and **`ueln`**
+(international, so the join key to any other registry), an *exact* `birthDate` where `archive.horse`
+has only a year, breeder, colour, breed, and `sireId`/`damId` — a pedigree graph with stable ids
+instead of the name strings the Veikkaus payload carries. `birthCountry` is the origin field the
+same-country name rule needs, and it is emphatically not `registrationCountry`: `In Love Mearas` is
+born SE and registered FI, like every import.
+
+**It does not improve identity resolution, contrary to the expectation that motivated it.** 5,232 of
+the 5,235 horses with no registry id race only on the Swedish simulcast and combination-pool cards,
+and Heppa is the *Finnish* registry — it has no record of them, so there is no `/horse/{id}` to
+fetch. The registry-id path already reaches everything it can. Only 3 id-less horses ever started at
+a real Finnish track.
+
+`/horse/{id}/stats` is deliberately left alone: it is as-of-now, so it would leak results into any
+as-of-race-day feature, and the same numbers are derivable from the start corpus with correct
+point-in-time semantics. `/horse/{id}/pedigree` goes back three generations and is a further crawl,
+not done.
 
 **Heppa does not replace the Veikkaus crawl.** It has no odds history (269,010 `odds_snapshot`
 rows) and no betting percentages (414,457 rows), and its horse-level figures are as-of-now rather
@@ -352,6 +376,7 @@ the results half of the dataset no longer depends on Veikkaus at all.
 | **1 — Build** | Manifest ledger, fetcher with politeness/backoff, raw-zone writer, parsers + schema, unit tests for km-time/result-code parsing | 2–3 days | **done** — `veikkaus backfill` / `parse` / `status` |
 | **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks | ~1–2 days wall-clock | **done** — 2021-01-01 → 2026-08, 2,701 cards / 26,348 races |
 | **2b — Heppa** | Crawl the registry for the finishing order the Veikkaus API structurally cannot publish (§8b); merge into `start`, resolve horse identity | ~16 h wall-clock | **done** — `veikkaus heppa` |
+| **2c — Registry** | One `/horse/{id}` per horse (§8d): UELN, exact birth date, origin, breeding, parent ids | ~8 h wall-clock | built — `veikkaus heppa-horses`, crawl not yet run |
 | **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time | ½ day to set up | not started |
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 

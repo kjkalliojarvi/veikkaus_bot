@@ -12,8 +12,8 @@ from . import archive_db
 from .archive_db import ArchiveDb, db_ops
 from .crawler import Manifest
 from .fetcher import read_raw
-from .models import (Card, HeppaEvent, HeppaRaceEntry, HeppaStart, Race, Runner,
-                     Stat)
+from .models import (Card, HeppaEvent, HeppaHorse, HeppaRaceEntry, HeppaStart,
+                     Race, Runner, Stat)
 
 
 FLUSH = 5000
@@ -218,6 +218,19 @@ def parse_heppa_odds(text: str | None) -> int | None:
         return round(float(text.strip()) * 100)
     except ValueError:
         return None
+
+
+def blank_to_none(text: str | None) -> str | None:
+    """Heppa's placeholder for an absent value is '-', not an empty field.
+
+    Kept out of the tables: a horse with no known breeder is not a horse bred
+    by '-', and letting the placeholder through would make every count of
+    "how many do we know" wrong.
+    """
+    if text is None:
+        return None
+    text = text.strip()
+    return text or None if text != '-' else None
 
 
 def parse_heppa_auto_start(distance_code: str | None) -> bool | None:
@@ -555,6 +568,54 @@ def heppa_start_record(start: HeppaStart) -> tuple:
             start.commentText)
 
 
+def heppa_horse_record(horse: HeppaHorse) -> tuple:
+    """One horse's registry record.
+
+    `sire` and `dam` arrive as nested objects and are flattened to id, name and
+    registration number — one generation, which is all this endpoint carries.
+
+    Heppa writes '-' for an absent value in most of these fields, and a '-'
+    breeder is not a breeder called '-'.
+
+    Column order must stay in sync with archive_db.INSERT_HEPPA_HORSE.
+    """
+    sire = horse.sire or {}
+    dam = horse.dam or {}
+    return (horse.id,
+            blank_to_none(horse.name),
+            blank_to_none(horse.birthDate),
+            horse.birthDateAccurate,
+            blank_to_none(horse.registerNo),
+            blank_to_none(horse.ueln),
+            blank_to_none(horse.chipNo),
+            horse.dead,
+            horse.registrationSuspended,
+            blank_to_none(horse.species),
+            blank_to_none(horse.breedCode),
+            blank_to_none(horse.breedFinName),
+            blank_to_none(horse.gender),
+            blank_to_none(horse.color),
+            blank_to_none(horse.birthCountry),
+            blank_to_none(horse.birthCountryName),
+            blank_to_none(horse.birthPlace),
+            blank_to_none(horse.origin),
+            blank_to_none(horse.registrationCountry),
+            blank_to_none(horse.breedingUnion),
+            blank_to_none(horse.breederName),
+            blank_to_none(horse.ownerName),
+            blank_to_none(horse.trainerId),
+            blank_to_none(horse.trainerName),
+            blank_to_none(horse.homeTrackName),
+            blank_to_none(horse.homeTrackCity),
+            blank_to_none(horse.bestRecord),
+            blank_to_none(sire.get('id')),
+            blank_to_none(sire.get('name')),
+            blank_to_none(sire.get('registerNo')),
+            blank_to_none(dam.get('id')),
+            blank_to_none(dam.get('name')),
+            blank_to_none(dam.get('registerNo')))
+
+
 def _flush(store, rows, force=False):
     if rows and (force or len(rows) >= FLUSH):
         store(rows)
@@ -816,6 +877,21 @@ def _parse_heppa_starts(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int
     return count
 
 
+def _parse_heppa_horses(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
+    """One object per response here, not a list — this endpoint returns a horse."""
+    rows = []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_horse'):
+        try:
+            rows.append(heppa_horse_record(HeppaHorse(**payload)))
+            count += 1
+        except Exception as e:
+            print(f'{task.rawPath}: horse {task.entityId}: {e}')
+        _flush(db.store_heppa_horses, rows)
+    _flush(db.store_heppa_horses, rows, force=True)
+    return count
+
+
 def parse_all(db_name: str, raw_root: str, country: str) -> dict:
     """Walk the raw zone into the archive tables. Idempotent."""
     with db_ops(db_name) as conn:
@@ -831,6 +907,7 @@ def parse_all(db_name: str, raw_root: str, country: str) -> dict:
         heppa_events = _parse_heppa_events(manifest, raw_root, db)
         heppa_races = _parse_heppa_races(manifest, raw_root, db)
         heppa_starts = _parse_heppa_starts(manifest, raw_root, db)
+        heppa_horses = _parse_heppa_horses(manifest, raw_root, db)
         db.recompute_start_intervals()
         db.recompute_prev_start_coaches()
         db.recompute_auto_starts()
@@ -840,7 +917,8 @@ def parse_all(db_name: str, raw_root: str, country: str) -> dict:
         db.recompute_start_from_heppa()
         counts = {'cards': cards, 'races': races, 'starts': starts,
                   'prev-starts': prevstarts, 'heppa events': heppa_events,
-                  'heppa races': heppa_races, 'heppa starts': heppa_starts}
+                  'heppa races': heppa_races, 'heppa starts': heppa_starts,
+                  'heppa horses': heppa_horses}
     return counts
 
 

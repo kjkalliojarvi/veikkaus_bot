@@ -4,8 +4,9 @@ import duckdb
 import pytest
 
 from veikkaus_bot.crawler import CARDS_DATE, Manifest, Task, cards_task
-from veikkaus_bot.heppa import (HEPPA_RACES, HEPPA_RESULTS, HEPPA_START, HEPPA_TYPES,
-                                expand, months, results_task)
+from veikkaus_bot.heppa import (HEPPA_HORSE, HEPPA_HORSE_TYPES, HEPPA_RACES,
+                                HEPPA_RESULTS, HEPPA_START, HEPPA_TYPES, expand,
+                                horse_task, months, results_task)
 
 
 @pytest.fixture
@@ -138,3 +139,38 @@ def test_heppa_stages_sort_after_the_veikkaus_ones_within_a_date():
     """Both sources share next_pending()'s (meetDate DESC, stage ASC) ordering,
     so the stage ranges must not overlap."""
     assert CARDS_DATE < HEPPA_RESULTS < HEPPA_RACES < HEPPA_START
+
+
+def test_horse_task_shards_the_raw_zone():
+    """14,050 horses in one directory is not fatal, only unpleasant."""
+    task = horse_task('7913507947789197818')
+    assert task.endpointType == 'heppa_horse'
+    assert task.entityId == '7913507947789197818'
+    assert task.url == '/horse/7913507947789197818'
+    assert task.rawPath == 'heppa/horse/18/7913507947789197818.json.gz'
+    assert task.meetDate is None          # a horse has no meet date
+    assert task.stage == HEPPA_HORSE
+
+
+def test_a_horse_record_is_a_leaf():
+    task = horse_task('7913507947789197818')
+    assert expand(task, {'id': '7913507947789197818', 'name': "Boomer's Revenge"}) == []
+
+
+def test_the_horse_crawl_does_not_drain_the_meetings_crawl(manifest):
+    """Two separate opt-ins: a one-day results run must not kick off an
+    eight-hour horse crawl, and vice versa."""
+    manifest.enqueue([results_task(date(2026, 8, 1), date(2026, 8, 31)),
+                      horse_task('7913507947789197818')])
+    assert [t.endpointType for t in manifest.next_pending(10, HEPPA_TYPES)] == ['heppa_results']
+    assert [t.endpointType for t in manifest.next_pending(10, HEPPA_HORSE_TYPES)] == ['heppa_horse']
+
+
+def test_re_enqueueing_a_known_horse_never_refetches_it(manifest):
+    """Re-running after a later meetings crawl should cost only the new horses."""
+    task = horse_task('7913507947789197818')
+    manifest.enqueue([task])
+    manifest.mark(task, 'done', 200, None)
+    manifest.enqueue([task, horse_task('4605744788003903677')])
+    assert [t.entityId for t in manifest.next_pending(10, HEPPA_HORSE_TYPES)] == [
+        '4605744788003903677']

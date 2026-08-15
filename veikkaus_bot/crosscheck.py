@@ -192,6 +192,27 @@ REPORTS = (
         HAVING count(*) > 1 ORDER BY 2 DESC, 1 LIMIT 15
     """),
 
+    # `heppa-horses` is a separate opt-in, so this is empty until it has run.
+    ('Registry records: coverage and what they add', """
+        SELECT (SELECT count(DISTINCT horseId) FROM archive.heppa_start
+                 WHERE horseId IS NOT NULL) AS horses_seen_racing,
+               (SELECT count(*) FROM archive.heppa_horse) AS registry_records,
+               (SELECT count(*) FROM archive.heppa_horse WHERE ueln IS NOT NULL) AS with_ueln,
+               (SELECT count(*) FROM archive.heppa_horse WHERE birthDate IS NOT NULL) AS with_exact_birthdate,
+               (SELECT count(*) FROM archive.heppa_horse WHERE sireId IS NOT NULL) AS with_sire_id
+    """),
+
+    # The tag in a Veikkaus horse name gestures at origin; birthCountry states
+    # it. Rows where they disagree are imports racing in Finland — and the
+    # reason registrationCountry is the wrong field for identity work.
+    ('Registry records: origin against where the horse races', """
+        SELECT coalesce(birthCountry, '(unknown)') AS origin,
+               count(*) AS horses,
+               sum(CASE WHEN registrationCountry <> birthCountry THEN 1 ELSE 0 END)
+                   AS races_elsewhere
+        FROM archive.heppa_horse GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+    """),
+
     # The failure mode of the name fallback: two horses of different origin
     # sharing a base name and a foaling year. Rows here are merges to distrust.
     ('Horse identity: merged without a registry id to vouch for it', """

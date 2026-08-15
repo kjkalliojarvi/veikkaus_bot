@@ -1,7 +1,8 @@
 import pytest
 
-from veikkaus_bot.models import HeppaStart, Runner
+from veikkaus_bot.models import HeppaHorse, HeppaStart, Runner
 from veikkaus_bot.parse import (_captured_at, base_horse_key, betpercentage_records,
+                                blank_to_none, heppa_horse_record,
                                 heppa_start_record, horse_key, is_placeholder,
                                 normalize_name, parse_heppa_auto_start,
                                 parse_heppa_int, parse_heppa_km_time,
@@ -422,3 +423,85 @@ def test_base_horse_key_loses_the_origin_that_horse_key_keeps():
     registry id can, which is why RECOMPUTE_HORSE_IDENTITY prefers it."""
     assert horse_key('Elliot', 2016) != horse_key('Elliot (DK)', 2016)
     assert base_horse_key('Elliot', 2016) == base_horse_key('Elliot (DK)', 2016)
+
+
+# --- the registry record ------------------------------------------------------
+
+BOOMER_HORSE = {'id': '7913507947789197818', 'name': "Boomer's Revenge",
+                'birthDate': '2021-06-14', 'birthDateAccurate': True,
+                'registerNo': '246001L00211779', 'ueln': '246001L00211779',
+                'chipNo': '246000026217495', 'chipNo2': '-', 'dead': False,
+                'species': 'L', 'breedFinName': 'Amerikkalainen', 'breedCode': 'A',
+                'gender': 'O', 'color': 'punaruunikko', 'registrationSuspended': False,
+                'birthCountry': 'FI', 'birthCountryName': 'Suomi', 'birthPlace': 'Joensuu',
+                'origin': 'FI', 'breedingUnion': 'Pohjois-Karjalan Hjl',
+                'registrationCountry': 'FI', 'ownerName': 'Cathill Stable',
+                'breederName': 'Cathill Stable', 'groomName': 'Erika Vaittinen',
+                'racingRenterName': '-', 'trainerId': '828320150867768153',
+                'trainerName': 'Pasi Vaittinen', 'homeTrackName': 'Linnunlahti',
+                'homeTrackCity': 'Joensuu', 'bestRecord': '18,0ke', 'age': '5',
+                'sire': {'id': '6600639144951126845', 'name': 'Zola Boko*',
+                         'registerNo': 'S-06-3122', 'laboratoryNumber': '-'},
+                'dam': {'id': '4125784394378719727', 'name': 'Beautifly',
+                        'registerNo': '246001L00141755'}}
+
+HORSE_FIELDS = ('horseId horseName birthDate birthDateAccurate registerNo ueln chipNo dead '
+                'registrationSuspended species breedCode breedFinName gender color '
+                'birthCountry birthCountryName birthPlace origin registrationCountry '
+                'breedingUnion breederName ownerName trainerId trainerName homeTrackName '
+                'homeTrackCity bestRecord sireId sireName sireRegisterNo damId damName '
+                'damRegisterNo').split()
+
+
+def horse_field(record):
+    return dict(zip(HORSE_FIELDS, record))
+
+
+@pytest.mark.parametrize('text, expected', [
+    ('-', None),          # Heppa's placeholder for an absent value
+    ('', None), (None, None), ('  ', None),
+    ('Cathill Stable', 'Cathill Stable'),
+    ('A-1', 'A-1'),       # a hyphen inside a real value is not a placeholder
+])
+def test_blank_to_none(text, expected):
+    assert blank_to_none(text) == expected
+
+
+def test_heppa_horse_record_carries_the_identifiers_veikkaus_lacks():
+    row = horse_field(heppa_horse_record(HeppaHorse(**BOOMER_HORSE)))
+    assert row['horseId'] == '7913507947789197818'
+    assert row['registerNo'] == '246001L00211779'
+    assert row['ueln'] == '246001L00211779'      # international; the cross-registry key
+    assert row['birthDate'] == '2021-06-14'      # exact, where archive.horse has a year
+
+
+def test_heppa_horse_record_separates_origin_from_where_it_races():
+    """birthCountry is what the country tag in a Veikkaus name gestures at;
+    registrationCountry reads FI for any import."""
+    row = horse_field(heppa_horse_record(HeppaHorse(**BOOMER_HORSE)))
+    assert (row['birthCountry'], row['registrationCountry']) == ('FI', 'FI')
+    imported = horse_field(heppa_horse_record(HeppaHorse(
+        **(BOOMER_HORSE | {'birthCountry': 'SE', 'registrationCountry': 'FI'}))))
+    assert (imported['birthCountry'], imported['registrationCountry']) == ('SE', 'FI')
+
+
+def test_heppa_horse_record_flattens_the_parents():
+    row = horse_field(heppa_horse_record(HeppaHorse(**BOOMER_HORSE)))
+    assert (row['sireId'], row['sireName']) == ('6600639144951126845', 'Zola Boko*')
+    assert (row['damId'], row['damRegisterNo']) == ('4125784394378719727', '246001L00141755')
+
+
+def test_heppa_horse_record_drops_the_dash_placeholders():
+    """A horse with no known breeder is not a horse bred by '-'."""
+    row = horse_field(heppa_horse_record(HeppaHorse(
+        **(BOOMER_HORSE | {'breederName': '-', 'birthPlace': '-', 'bestRecord': '-'}))))
+    assert row['breederName'] is None
+    assert row['birthPlace'] is None
+    assert row['bestRecord'] is None
+
+
+def test_heppa_horse_record_survives_a_payload_with_only_an_id():
+    """Only `id` is required — a validation error would cost the whole horse."""
+    row = horse_field(heppa_horse_record(HeppaHorse(id='123')))
+    assert row['horseId'] == '123'
+    assert row['sireId'] is None and row['ueln'] is None
