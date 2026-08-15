@@ -187,7 +187,10 @@ def crawl(manifest: Manifest, fetcher: Fetcher, expander, types: tuple = VEIKKAU
             manifest.mark(task, 'done', result.httpCode, None)
             fetched += 1
             if fetched % 100 == 0:
-                print(f'{fetched} fetched, at {task.meetDate} ({task.endpointType})', flush=True)
+                # Most tasks are placed by their meet date; a horse has none,
+                # so fall back to the entity it names.
+                where = task.meetDate or task.entityId
+                print(f'{fetched} fetched, at {where} ({task.endpointType})', flush=True)
 
 
 def backfill(args):

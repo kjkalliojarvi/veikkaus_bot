@@ -362,6 +362,20 @@ as-of-race-day feature, and the same numbers are derivable from the start corpus
 point-in-time semantics. `/horse/{id}/pedigree` goes back three generations and is a further crawl,
 not done.
 
+The crawl completed with **14,050 of 14,050 records and no failures**: exact birth dates and parent
+ids on every horse, UELN on 13,515 (96 %, the rest older imports), breeders on 13,609, and 1,324
+distinct sires. It also validated the archive: all 11,851 birth years that can be checked against an
+exact `birthDate` agree, with zero disagreements.
+
+**It settled the horse-identity question rather than improving it.** With real origin data, a name is
+unique within an origin country only among *contemporaries* — of the 10 name+origin pairs, 9 are a
+name reused a generation later (Consta FI 2019/2021, Lemmy FI 2011/2022, Wallander FI 2010/2020) and
+one, `Editor` FI foaled six weeks apart in 2020, is a genuine same-year pair. Names repeat across
+origins on 8 names. So birth year, not country, is the load-bearing part of the key: **(name, birth
+year) collides on 2 pairs in 14,050 — 0.014 %** — against 10 for (name, origin) and 1 for all three.
+Adding origin would halve the error and is not worth doing, because origin only exists for horses
+that have a registry id, and those never reach the name fallback. §5's identity problem is closed.
+
 **Heppa does not replace the Veikkaus crawl.** It has no odds history (269,010 `odds_snapshot`
 rows) and no betting percentages (414,457 rows), and its horse-level figures are as-of-now rather
 than as-of-race-day: `horsePriceSum` includes the race being reported, where `careerWinnings` is
@@ -376,7 +390,7 @@ the results half of the dataset no longer depends on Veikkaus at all.
 | **1 — Build** | Manifest ledger, fetcher with politeness/backoff, raw-zone writer, parsers + schema, unit tests for km-time/result-code parsing | 2–3 days | **done** — `veikkaus backfill` / `parse` / `status` |
 | **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks | ~1–2 days wall-clock | **done** — 2021-01-01 → 2026-08, 2,701 cards / 26,348 races |
 | **2b — Heppa** | Crawl the registry for the finishing order the Veikkaus API structurally cannot publish (§8b); merge into `start`, resolve horse identity | ~16 h wall-clock | **done** — `veikkaus heppa` |
-| **2c — Registry** | One `/horse/{id}` per horse (§8d): UELN, exact birth date, origin, breeding, parent ids | ~8 h wall-clock | built — `veikkaus heppa-horses`, crawl not yet run |
+| **2c — Registry** | One `/horse/{id}` per horse (§8d): UELN, exact birth date, origin, breeding, parent ids | ~8 h wall-clock | **done** — 14,050/14,050, no failures |
 | **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time | ½ day to set up | not started |
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 
