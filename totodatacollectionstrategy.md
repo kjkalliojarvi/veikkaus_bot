@@ -359,8 +359,10 @@ a real Finnish track.
 
 `/horse/{id}/stats` is deliberately left alone: it is as-of-now, so it would leak results into any
 as-of-race-day feature, and the same numbers are derivable from the start corpus with correct
-point-in-time semantics. `/horse/{id}/pedigree` goes back three generations and is a further crawl,
-not done.
+point-in-time semantics. `/horse/{id}/pedigree` goes back three generations; it is **out of scope by
+decision** rather than left undone — one generation with stable parent ids covers the modelling this
+archive is for, and the second and third would cost another 14,050 requests. Revisit only if a
+breeding-side question actually needs grandparents.
 
 The crawl completed with **14,050 of 14,050 records and no failures**: exact birth dates and parent
 ids on every horse, UELN on 13,515 (96 %, the rest older imports), breeders on 13,609, and 1,324
