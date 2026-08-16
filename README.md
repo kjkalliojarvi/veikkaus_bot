@@ -61,6 +61,38 @@ It does **not** improve horse-identity resolution, despite appearances: 5,232 of
 
 Two disagreements are expected and are not faults. **Horse names differ on imports** — Veikkaus appends the country tag (`Kapplans Orlando (SE)`), Heppa keeps it in `horseRegistrationCountry` — which is exactly why the bridge is positional and never name-based. **Km-time strings differ** wherever a start-type or equipment marker exists: Veikkaus writes `31,5x`, `m18,5a`; Heppa's short form is bare. The parsed `kmTimeMs` is what has to agree, so `start.kmTime` is not uniform after the merge — analyse on `kmTimeMs` and `autoStart`.
 
+### Keeping the archive up to date
+
+Both crawls are resumable and skip what they already have, so the recommended cycle is to pin `--from` at the start of the archive and move only `--to`:
+
+```bash
+LAST=$(date -v-2d +%F)                                  # BSD/macOS date; GNU: date -d '2 days ago' +%F
+uv run veikkaus backfill --from 2021-01-01 --to "$LAST"
+uv run veikkaus heppa    --from 2021-01-01 --to "$LAST"
+uv run veikkaus heppa-horses
+uv run veikkaus parse
+```
+
+Already-crawled dates cost nothing, so there is no date arithmetic to get wrong on `--from`. **`--to` is the parameter that matters, and it must never reach a day whose racing is not yet final.**
+
+**Why the lag.** A race that has not run still answers `/race/{raceId}/results` with HTTP 200 — `raceStatus: OPEN` and an empty `results` list. The crawler stores that, marks the task `done`, and because re-enqueueing uses `INSERT OR IGNORE` it is **never fetched again**. Crawl a card too early and its placings are gone from the Veikkaus side for good. Two days is comfortable; it also covers late protests and corrections.
+
+Heppa is more forgiving, and is the safety net. Its month-listing task id contains the actual date range, so the current month is re-listed on every run, and `expand()` only follows meetings whose `hasPublishedResults` is true — a meeting crawled too early is simply not crawled at all until its results exist. So even a premature Veikkaus card recovers its placings later; what you lose is that day's odds and betting percentages, which have to be captured live regardless.
+
+**Why `heppa-horses` comes before `parse`.** It reads horse ids out of `archive.heppa_start`, so it sees the previous cycle's parse. Running it there means new horses lag by one cycle and you pay for one parse instead of two — the right trade for a scheduled job.
+
+**Cost.** The crawls are a few hundred requests. `parse` is the expensive part at roughly an hour, because it re-reads and re-validates the whole raw zone every time; see [Development](#development).
+
+**If a date does get crawled too early**, there is currently no flag for it — reset the manifest rows by hand and re-run:
+
+```sql
+DELETE FROM archive.manifest
+WHERE meetDate = '2026-08-16'
+  AND endpointType IN ('cards_date','races','runners','results','pools','odds');
+```
+
+The raw files are overwritten on the next crawl. Note that `--retry-failed` resets only `failed` rows; `done` and `missing` are permanent.
+
 ### Crawl off-peak
 
 **When you crawl matters more than how fast.** Finnish racing runs roughly 12:00–22:00 local time, and during those hours the API is serving live betting traffic and odds updates. Crawling in the small hours puts the load where their capacity is idle:
@@ -119,6 +151,22 @@ make install       # uv sync
 make run-tests     # uv run pytest tests
 make dist          # build sdist + wheel
 ```
+
+### Where parse spends its hour
+
+Measured over the full archive, so that the next person optimising it starts from data rather than intuition:
+
+| phase | payloads | cost |
+|---|---|---|
+| `_parse_heppa_starts` | 31,822 | **~35 min** |
+| `_parse_runners` | 26,369 | **~31 min** |
+| `_odds_map` | 51,045 | ~10 min |
+| `_results_map`, cards, races, heppa races/horses | ~21,600 | ~7 min |
+| all five `recompute_*` | whole tables | **0.3 s** |
+
+The cost is **per payload, and it is Pydantic validation rather than I/O** — reading a gzipped file is about 3 ms of the ~70 ms a runners payload takes. The recomputes are free, so keeping them whole-table (which is what makes them deterministic) costs nothing.
+
+That shape is what makes an incremental parse worth building: a nightly cycle touches perhaps a dozen race days, so skipping already-parsed payloads would turn the hour into seconds without changing any of the derivation logic.
 
 ## License
 

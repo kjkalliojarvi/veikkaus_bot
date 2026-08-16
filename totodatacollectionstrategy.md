@@ -258,6 +258,140 @@ A small daily job keeps the dataset current and — critically for ML — captur
 
 The daily cycle: in the morning, fetch `/cards/today` (and tomorrow's date) and store the entry lists — this is the "as-known-before-the-race" snapshot, including scratches as they appear. If you want odds as a feature, poll each race's win pool a few times in the final ~30 minutes before its start (e.g. T-30, T-10, T-2) into `odds_snapshot`; historical endpoints will most likely give you only final odds, so forward collection is the only way to get odds trajectories. Then, 1–2 hours after each card finishes, re-fetch the runners for every race to pick up official results, and re-fetch once more the next morning to catch late corrections/protests. Schedule it with cron/systemd on any always-on machine; the job is a few hundred requests per day at most.
 
+### 7b. The recommended cycle, as the commands actually behave
+
+§7 assumed results could be re-fetched at will. They cannot, and the reason shapes everything else.
+
+**A `done` task is never fetched again.** `enqueue` uses `INSERT OR IGNORE`, and `--retry-failed`
+resets only `failed` — `done` and `missing` are permanent. Combined with the fact that **a race that
+has not run answers `/race/{raceId}/results` with HTTP 200**, `raceStatus: OPEN` and an empty
+`results` list, crawling a card before its racing is final marks it complete and loses those placings
+from the Veikkaus side for good. Verified live on 2026-08-16.
+
+So the cycle pins `--from` and moves only `--to`, which must lag reality:
+
+```bash
+LAST=$(date -v-2d +%F)
+uv run veikkaus backfill --from 2021-01-01 --to "$LAST"
+uv run veikkaus heppa    --from 2021-01-01 --to "$LAST"
+uv run veikkaus heppa-horses      # reads the previous cycle's parse; new horses lag one run
+uv run veikkaus parse
+```
+
+**Heppa is the safety net, because it self-heals and Veikkaus does not.** Its month-listing task id
+contains the actual date range, so the current month is re-listed every run, and `expand()` only
+follows meetings whose `hasPublishedResults` is true — a meeting crawled too early is not crawled at
+all until its results exist. A premature Veikkaus card therefore still recovers its placings; what is
+lost is that day's odds and betting percentages, which have to be captured live regardless.
+
+Two things this cycle wants that do not exist yet, designed below.
+
+### 7c. Design: incremental parse
+
+`parse` re-reads and re-validates the entire raw zone on every run — about an hour — while a nightly
+cycle adds perhaps a dozen race days. Measured breakdown over the full archive:
+
+| phase | payloads | cost |
+|---|---|---|
+| `_parse_heppa_starts` | 31,822 | ~35 min |
+| `_parse_runners` | 26,369 | ~31 min |
+| `_odds_map` | 51,045 | ~10 min |
+| everything else | ~21,600 | ~7 min |
+| all five `recompute_*` | whole tables | **0.3 s** |
+
+The cost is **per payload and it is Pydantic validation, not I/O** — a gzipped read is ~3 ms of the
+~70 ms a runners payload takes. So skipping already-parsed payloads is the whole win, and the
+recomputes should stay whole-table: they are free, and being whole-table is what makes them
+deterministic.
+
+**Mechanism: a `parsedAt` column on the manifest.**
+
+- `ALTER TABLE archive.manifest ADD COLUMN IF NOT EXISTS parsedAt TEXT`, alongside the existing
+  `ADD_COLUMNS` migrations.
+- `_each_payload` selects `status = 'done' AND (parsedAt IS NULL OR parsedAt < fetchedAt)`.
+- Each phase stamps `parsedAt` for the tasks it consumed, in one `executemany` after its final
+  forced flush. A crash mid-phase re-does that phase, which is safe because every upsert is
+  idempotent.
+- `parse --full` ignores `parsedAt`, for re-parsing after a parser change. **This is the one manual
+  step the design keeps** — changing a `*_record()` builder without `--full` silently leaves old rows
+  in place.
+
+Comparing `parsedAt` against `fetchedAt` rather than keeping a single global watermark is what makes
+this compose with §7d: a re-fetched row gets a newer `fetchedAt` and is re-parsed automatically.
+
+**The dependency that makes it non-trivial.** `_parse_runners` needs the results and odds maps for
+the races it is parsing, and those payloads will usually already be parsed. Two fixes, both
+worthwhile on their own:
+
+- **Scope `_results_map` to the work in hand** rather than building it from unparsed payloads: take
+  the pending runners tasks, read the `results` payloads for their `entityId` (the raceId) and the
+  `races` payloads for their `cardId` — both columns are already on every manifest row. A dozen cards
+  is a handful of files.
+- **Read final win odds from `archive.odds_snapshot` instead of rebuilding them in memory.** They are
+  already stored there; `_odds_map` currently does two unrelated jobs, and splitting them removes the
+  dependency entirely. It is also *more* correct: picking the latest `capturedAt` per
+  (raceId, startNumber) is deterministic, where the current in-memory map keeps whichever payload
+  happened to be iterated last. Flag it as a deliberate behaviour change.
+
+`_parse_heppa_starts`, `_parse_heppa_horses` and the rest have no cross-payload dependency and become
+incremental for free.
+
+**Expected result:** a nightly cycle drops from ~60 min to seconds.
+
+**Tests.** Parse twice and assert the second run reports zero of everything and leaves the tables
+byte-identical; bump one row's `fetchedAt` and assert exactly that payload re-parses; assert `--full`
+re-parses everything; assert a runners payload parsed in isolation still picks up its placings, which
+is the regression the scoped `_results_map` risks.
+
+### 7d. Design: `--refetch-from`
+
+Recovering an early crawl currently means hand-written `DELETE FROM archive.manifest`. Replace it
+with an explicit window reset on `backfill` and `heppa`:
+
+```
+--refetch-from D [--refetch-to D]      # --refetch-to defaults to --refetch-from
+```
+
+A **separate window from `--from`/`--to`** on purpose: the recommended cycle pins `--from` at
+2021-01-01, so a `--refetch` flag reusing that window would silently re-crawl five years.
+
+Shared implementation on `Manifest`, so both sources get identical semantics:
+
+```python
+def reset_window(self, first: str, last: str, types: tuple) -> int:
+    """Mark a date range fetchable again. Returns the number of rows reset."""
+```
+
+```sql
+UPDATE archive.manifest SET status = 'pending'
+WHERE meetDate BETWEEN ? AND ? AND endpointType IN (…) AND status <> 'pending'
+```
+
+Points that matter:
+
+- **Restricted to the calling source's endpoint types**, so `backfill --refetch-from` cannot reset
+  Heppa rows.
+- Resets `missing` and `failed` as well as `done` — recovering a mis-timed crawl is the whole point.
+- Every Veikkaus and Heppa *meeting* task carries `meetDate`, so a date range reaches parents and
+  children alike, and re-expansion is harmless because the children are pending too.
+- `heppa_horse` has a NULL `meetDate` and is correctly never touched — a horse is not dated.
+- `heppa_results` month tasks sit on the month's first day, so a mid-month window misses them. That
+  is fine: their id encodes the range, so the current month is re-listed anyway.
+- **Raw files are not deleted.** They are overwritten on success, so a re-crawl that fails leaves the
+  previous archive intact.
+- Print the number of rows reset before crawling, so an over-wide window is visible rather than
+  silently expensive.
+
+It composes with §7c for free: reset rows get a new `fetchedAt`, which is newer than their
+`parsedAt`, so the next `parse` picks up exactly those. One caveat to document — re-parsing a payload
+whose *contents* changed upserts the new rows but does not delete rows that vanished (a withdrawn
+start number, say). That is a pre-existing property of `INSERT OR REPLACE`, not something this
+introduces.
+
+**Tests.** The reset touches only the window and only the calling source's types; a `done` row inside
+becomes pending and one outside does not; `heppa_horse` rows are never reset; the count returned
+matches the rows changed.
+
 ## 8. Validation and cross-checking
 
 Trust but verify, per phase. After backfill, run structural checks: every card has races, every non-cancelled official race has runners with results, placings within a race are consistent (unique, gap-free apart from dq/dnf), km times fall in plausible ranges (1:08–1:50), and per-year race counts match the ~5,500–6,500 expectation. Finally, sanity-check the ML view: pick a well-known horse, pull its reconstructed career line from `start`, and compare with its Heppa career page — this specifically validates the horse-identity resolution of §5.
@@ -397,7 +531,7 @@ the results half of the dataset no longer depends on Veikkaus at all.
 | **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks | ~1–2 days wall-clock | **done** — 2021-01-01 → 2026-08, 2,701 cards / 26,348 races |
 | **2b — Heppa** | Crawl the registry for the finishing order the Veikkaus API structurally cannot publish (§8b); merge into `start`, resolve horse identity | ~16 h wall-clock | **done** — `veikkaus heppa` |
 | **2c — Registry** | One `/horse/{id}` per horse (§8d): UELN, exact birth date, origin, breeding, parent ids | ~8 h wall-clock | **done** — 14,050/14,050, no failures |
-| **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time | ½ day to set up | not started |
+| **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time. Cycle and its constraints worked out in §7b; incremental parse (§7c) and `--refetch-from` (§7d) designed, not built | ½ day to set up | not started |
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 
 One §5 addition made during Phase 1: `archive.prev_start` holds the per-horse career lines
