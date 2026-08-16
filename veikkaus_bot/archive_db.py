@@ -63,6 +63,11 @@ INSERT_RACE = ('INSERT OR REPLACE INTO archive.race '
                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
 RACE_KEY = (0,)  # raceId
 
+# `horseKey` stays the key every other table joins on — it is what the parser
+# can compute from a Veikkaus payload alone. `canonicalKey` is the identity to
+# *group* by: the registry knows that several horseKeys are one horse, and
+# RECOMPUTE_HORSE_IDENTITY writes that down. Analysis wanting one row per horse
+# should group on canonicalKey, not horseKey.
 CREATE_HORSE_TABLE = """
     CREATE TABLE IF NOT EXISTS archive.horse(
         horseKey TEXT,
@@ -72,9 +77,12 @@ CREATE_HORSE_TABLE = """
         sire TEXT,
         dam TEXT,
         damSire TEXT,
+        heppaHorseId TEXT,       -- Hippos's registry id; recomputed, see below
+        baseKey TEXT,            -- name key with the import markers removed
+        canonicalKey TEXT,       -- the horseKey that stands for this horse
         PRIMARY KEY (horseKey));
 """
-INSERT_HORSE = 'INSERT OR REPLACE INTO archive.horse VALUES (?, ?, ?, ?, ?, ?, ?);'
+INSERT_HORSE = 'INSERT OR REPLACE INTO archive.horse VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);'
 HORSE_KEY = (0,)  # horseKey
 
 # One row per (race, horse) — one past-performance line.
@@ -106,10 +114,15 @@ CREATE_START_TABLE = """
         kmTimeMs BIGINT,
         autoStart BOOLEAN,
         winOddsFinal BIGINT,
+        prizeWon BIGINT,         -- this race's purse; Heppa only, no Veikkaus equivalent
+        disqualifiedCode TEXT,   -- hpl, hll, hlo, hrp, k — Heppa only
+        gallop BOOLEAN,          -- Heppa only
+        resultSource TEXT,       -- which source supplied `placement`
         PRIMARY KEY (raceId, startNumber));
 """
 INSERT_START = ('INSERT OR REPLACE INTO archive.start '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
+                '?, ?, ?, ?);')
 START_KEY = (0, 1)  # raceId, startNumber
 
 CREATE_ODDS_TABLE = """
@@ -215,6 +228,188 @@ INSERT_PREVSTART = ('INSERT OR REPLACE INTO archive.prev_start VALUES '
                     '?, ?, ?, ?, ?, ?, ?);')
 PREVSTART_KEY = (1, 2, 6)  # horseKey, meetDate, raceNumber
 
+# --- Heppa (Suomen Hippos) --------------------------------------------------
+#
+# The official registry, crawled by heppa.py. Everything below is keyed on
+# (meetDate, trackCode[, raceNumber[, programNumber]]) — Heppa exposes no
+# equivalent of cardId or raceId, and that tuple is what joins back to
+# `archive.card` via `upper(card.trackAbbreviation)`. (date, trackCode) was
+# verified unique across all 472 events of 2025.
+#
+# These tables also cover the local (PAIKALLISRAVI) and pony (PONI) meetings
+# that the Veikkaus API never reports at all, so a row here need not have any
+# `archive.card` counterpart.
+CREATE_HEPPA_EVENT_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.heppa_event(
+        meetDate TEXT,
+        trackCode TEXT,
+        trackNumber BIGINT,
+        trackShortname TEXT,
+        trackName TEXT,
+        trackCity TEXT,
+        eventType TEXT,          -- TOTO*, PAIKALLISRAVI, PONI
+        name TEXT,
+        startTime TEXT,
+        meetNumber BIGINT,
+        trackType TEXT,          -- KESARATA / TALVIRATA
+        trackCondition TEXT,
+        temperature BIGINT,
+        specialRaceEventName TEXT,
+        majorRace BOOLEAN,
+        canceled BOOLEAN,
+        PRIMARY KEY (meetDate, trackCode));
+"""
+INSERT_HEPPA_EVENT = ('INSERT OR REPLACE INTO archive.heppa_event '
+                      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+HEPPA_EVENT_KEY = (0, 1)  # meetDate, trackCode
+
+# `raceNumber` is the payload's `race.startNumber` — Heppa's naming inverts the
+# Veikkaus vocabulary, where startNumber is the horse's number.
+CREATE_HEPPA_RACE_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.heppa_race(
+        meetDate TEXT,
+        trackCode TEXT,
+        raceNumber BIGINT,
+        raceName TEXT,
+        categoryNumber BIGINT,
+        plannedTime TEXT,
+        actualTime TEXT,
+        startForm TEXT,          -- TASOITUSAJO / RYHMALAHTO: handicap vs group,
+                                 -- NOT the CAR/VOLT axis of race.startType
+        monte BOOLEAN,
+        eventType TEXT,          -- LAMMINVERISET / SUOMENHEVOSET / ...
+        baseDistance BIGINT,
+        levellingHeader TEXT,
+        firstPrize BIGINT,
+        priceSum BIGINT,
+        status TEXT,
+        intermediateTime TEXT,
+        PRIMARY KEY (meetDate, trackCode, raceNumber));
+"""
+INSERT_HEPPA_RACE = ('INSERT OR REPLACE INTO archive.heppa_race '
+                     'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+HEPPA_RACE_KEY = (0, 1, 2)  # meetDate, trackCode, raceNumber
+
+# One row per (race, horse), from the official registry — the table that fills
+# the holes in `archive.start`. Unlike the Veikkaus results endpoint this
+# carries a finishing position for the *whole* field, plus three things the
+# Veikkaus API has no equivalent of at all: this race's prize money, a
+# disqualification code for every start, and stable registry ids.
+#
+# `placingRaw` keeps the code verbatim; `placement` holds only the numeric
+# placings, per parse.parse_placing(). The column cannot be called `placing` —
+# DuckDB's Postgres-derived parser reserves it, exactly as for archive.start.
+#
+# `horsePriceSum` is career earnings *including* this race, unlike Veikkaus's
+# pre-race `careerWinnings`. It is kept for cross-checking, never as a feature.
+#
+# `horseKey` is NULL at insert and recomputed: a Heppa start carries a birth
+# year nowhere, so identity has to come from the archive via `horseId`.
+CREATE_HEPPA_START_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.heppa_start(
+        meetDate TEXT,
+        trackCode TEXT,
+        raceNumber BIGINT,
+        programNumber BIGINT,    -- the horse's start number
+        horseKey TEXT,           -- recomputed from horseId, see below
+        horseId TEXT,            -- 19-digit registry id; TEXT, not BIGINT
+        horseName TEXT,
+        horseBreed TEXT,
+        horseRegistrationCountry TEXT,
+        startTrack BIGINT,       -- `lane`, named to match archive.start
+        distance BIGINT,
+        distanceCode TEXT,       -- 'ke'/'ake'/... — an 'a' prefix is an auto start
+        placingRaw TEXT,
+        placement BIGINT,        -- the numeric placings only
+        disqualifiedCode TEXT,   -- hpl, hll, hlo, hrp, k
+        gallop BOOLEAN,
+        absent BOOLEAN,          -- scratched
+        kmTime TEXT,             -- shortKilometerTime: the archive.start format
+        kmTimeMs BIGINT,
+        autoStart BOOLEAN,       -- from distanceCode, not from startForm
+        totalTime TEXT,
+        prizeWon BIGINT,         -- `price`: this race's purse for this horse
+        winOdd BIGINT,           -- hundredths, as archive.prev_start stores it
+        horsePriceSum BIGINT,    -- career earnings, POST-race: never a feature
+        driverId TEXT,
+        driverName TEXT,
+        driverFirstName TEXT,
+        driverLastName TEXT,
+        originalDriverId TEXT,
+        trainerId TEXT,
+        trainerName TEXT,
+        ownerName TEXT,
+        ownerCity TEXT,
+        frontShoes TEXT,         -- K / E / X, not Veikkaus's HAS_SHOES
+        rearShoes TEXT,
+        specialCart TEXT,        -- americanSulkyKEX
+        record TEXT,
+        recordType TEXT,
+        monte BOOLEAN,
+        status TEXT,
+        commentText TEXT,
+        PRIMARY KEY (meetDate, trackCode, raceNumber, programNumber));
+"""
+INSERT_HEPPA_START = ('INSERT OR REPLACE INTO archive.heppa_start VALUES '
+                      '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
+                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+HEPPA_START_KEY = (0, 1, 2, 3)  # meetDate, trackCode, raceNumber, programNumber
+
+# The registry's record of the animal rather than of a race — one row per
+# horse, from `/horse/{horseId}`. Nothing in it is time-varying, so unlike the
+# `/horse/{id}/stats` endpoint (deliberately not crawled) it cannot leak a
+# result into an as-of-race-day feature.
+#
+# `registerNo`/`ueln` is what the Veikkaus API has no equivalent of at all, and
+# unlike `horseId` it means something outside Heppa: UELN is international, so
+# it is the join to any other registry.
+#
+# `birthCountry` is the origin the country tag in a Veikkaus horse name is
+# gesturing at. Note it is not `registrationCountry`, which says where a horse
+# races and reads 'FI' for any import — the distinction that makes
+# `heppa_start.horseRegistrationCountry` the wrong field for identity work.
+CREATE_HEPPA_HORSE_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.heppa_horse(
+        horseId TEXT,
+        horseName TEXT,
+        birthDate TEXT,          -- exact, where archive.horse has only a year
+        birthDateAccurate BOOLEAN,
+        registerNo TEXT,
+        ueln TEXT,               -- international; the cross-registry join key
+        chipNo TEXT,
+        dead BOOLEAN,
+        registrationSuspended BOOLEAN,
+        species TEXT,
+        breedCode TEXT,
+        breedFinName TEXT,
+        gender TEXT,
+        color TEXT,
+        birthCountry TEXT,       -- origin
+        birthCountryName TEXT,
+        birthPlace TEXT,
+        origin TEXT,
+        registrationCountry TEXT,  -- where it races; not the origin
+        breedingUnion TEXT,
+        breederName TEXT,
+        ownerName TEXT,
+        trainerId TEXT,
+        trainerName TEXT,
+        homeTrackName TEXT,
+        homeTrackCity TEXT,
+        bestRecord TEXT,
+        sireId TEXT,
+        sireName TEXT,
+        sireRegisterNo TEXT,
+        damId TEXT,
+        damName TEXT,
+        damRegisterNo TEXT,
+        PRIMARY KEY (horseId));
+"""
+INSERT_HEPPA_HORSE = ('INSERT OR REPLACE INTO archive.heppa_horse VALUES '
+                      '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
+                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+HEPPA_HORSE_KEY = (0,)  # horseId
+
 # The prev-start block names a driver but never a trainer, so the trainer at
 # the time of a past start has to come from the archive itself: the crawled
 # `archive.start` row for that same race, which recorded the trainer as of that
@@ -305,9 +500,186 @@ RECOMPUTE_START_INTERVAL = """
       AND g.raceNumber = p.raceNumber;
 """
 
+# --- Heppa recomputes -------------------------------------------------------
+#
+# The bridge between the two sources is positional, never name-based:
+# (card.meetDate, upper(card.trackAbbreviation), race.number, start.startNumber)
+# against (meetDate, trackCode, raceNumber, programNumber). Matching on names
+# would break on the country tag that Veikkaus appends and Heppa keeps in a
+# separate `horseRegistrationCountry` field.
+#
+# `upper()` is what makes the track join work: Veikkaus writes 'Ku', 'Tk',
+# 'Jo'; Heppa writes 'KU', 'TK', 'JO'. Verified to match for every real Finnish
+# track in the archive. The cards that do not match are the Swedish simulcasts
+# (trackAbbreviation ending '-V') and the Veikkaus combination-pool meta-cards
+# (MM, KUN, CIT, T75, Sl, JAA) — neither is a real meeting and neither has a
+# Heppa counterpart by design.
+# Veikkaus writes Härmä two ways — 'Hr' (Härmä Powerpark) and 'Hr2' (Härmä),
+# both trackNumber 37 — while Heppa has only 'HR'. Upper-casing alone therefore
+# leaves 'HR2', which matches nothing, and it silently cost 28 meetings: 28 Hr2
+# cards and 28 otherwise-unmatched HR meetings, on exactly the same 28 dates,
+# with nothing left over on either side. 'Hr' and 'Hr2' never fall on the same
+# date, so folding both onto 'HR' cannot make a meeting ambiguous.
+#
+# Kept as an explicit alias rather than a rule like "strip trailing digits":
+# this is one quirk of one operator's vocabulary, not a pattern.
+HEPPA_TRACK_ALIASES = {'HR2': 'HR'}
+
+
+def heppa_track_code(alias: str = 'ca') -> str:
+    """SQL mapping a card's trackAbbreviation onto Heppa's trackCode."""
+    whens = ' '.join(f"WHEN '{k}' THEN '{v}'" for k, v in HEPPA_TRACK_ALIASES.items())
+    return f'CASE upper({alias}.trackAbbreviation) {whens} ELSE upper({alias}.trackAbbreviation) END'
+
+
+# The bridge itself, kept separate so that `crosscheck.py` validates the very
+# join the merge relies on rather than a hand-copied lookalike.
+HEPPA_START_BRIDGE = f"""
+    FROM archive.heppa_start h
+    JOIN archive.card ca ON ca.meetDate = h.meetDate
+                        AND {heppa_track_code('ca')} = h.trackCode
+    JOIN archive.race r ON r.cardId = ca.cardId AND r.number = h.raceNumber
+    JOIN archive.start s ON s.raceId = r.raceId AND s.startNumber = h.programNumber
+"""
+
+HEPPA_START_JOIN = f"""
+    SELECT s.raceId, s.startNumber, s.horseKey,
+           h.horseId, h.placement, h.kmTime, h.kmTimeMs, h.winOdd,
+           h.prizeWon, h.disqualifiedCode, h.gallop
+    {HEPPA_START_BRIDGE}
+"""
+
+# Hippos's registry id for a horse the archive already knows by name+birth year.
+# This is the identity resolution strategy §5 asks for: `horse_key()` is a
+# name-and-year guess, `horseId` is authoritative. A horseKey that resolves to
+# more than one horseId is a genuine collision — min() picks one so the column
+# stays deterministic, and the collision report in the docs finds the rest.
+RECOMPUTE_HEPPA_HORSE_ID = f"""
+    UPDATE archive.horse AS h
+    SET heppaHorseId = m.horseId
+    FROM (SELECT horseKey, min(horseId) AS horseId
+          FROM ({HEPPA_START_JOIN}) WHERE horseId IS NOT NULL
+          GROUP BY horseKey) AS m
+    WHERE m.horseKey = h.horseKey;
+"""
+
+# The reverse direction, and the reason the horse-level mapping exists at all:
+# a Heppa start carries no birth year, so `horse_key()` cannot be computed from
+# one. Going through `horseId` reaches the local and pony meetings too, where
+# there is no `archive.start` row to join to but the horse appears elsewhere in
+# the archive.
+RECOMPUTE_HEPPA_START_HORSEKEY = """
+    UPDATE archive.heppa_start AS h
+    SET horseKey = k.horseKey
+    FROM (SELECT heppaHorseId, min(horseKey) AS horseKey
+          FROM archive.horse WHERE heppaHorseId IS NOT NULL
+          GROUP BY heppaHorseId) AS k
+    WHERE k.heppaHorseId = h.horseId;
+"""
+
+# Which horseKeys are actually one horse.
+#
+# `horse_key()` is name + birth year, and Veikkaus writes an import's name
+# inconsistently — 'Humble Stance', 'Humble Stance* (FR)' and
+# 'Humble Stance FR* (FR)' are one horse under one registry id. That split 182
+# horses across 365 keys.
+#
+# The registry id decides wherever we have one, and `baseKey` only has to carry
+# the horses it does not reach. That order matters: base names collide across
+# origin countries — 'Elliot' and 'Elliot (DK)', both foaled 2016, are two real
+# horses — and grouping by the id first means the name fallback never gets the
+# chance to merge them. Names never repeat *within* an origin country, so for a
+# horse with no registry id the base name plus birth year is the best available
+# identity, and `base_horse_key()` is deliberately conservative about what it
+# strips.
+#
+# min() picks the representative so the column is deterministic.
+RECOMPUTE_HORSE_IDENTITY = """
+    UPDATE archive.horse AS h
+    SET canonicalKey = m.canonicalKey
+    FROM (SELECT coalesce(heppaHorseId, baseKey, horseKey) AS identity,
+                 min(horseKey) AS canonicalKey
+          FROM archive.horse
+          GROUP BY 1) AS m
+    WHERE coalesce(h.heppaHorseId, h.baseKey, h.horseKey) = m.identity;
+"""
+
+# The payoff: the whole field's finishing detail, merged into archive.start —
+# in three statements, because the merge has to be idempotent on its own.
+#
+# The obvious single UPDATE is not. It reads `s.placement` to decide
+# `resultSource` and writes `s.placement` in the same breath, so a second run
+# sees Heppa's own fill sitting there and relabels it 'veikkaus'. Every other
+# recompute in this file is a pure function of the tables it reads, and this
+# one has to be as well: `parse_all()` happens to rebuild `archive.start` from
+# the raw zone first, which would mask the problem, but a recompute whose
+# answer depends on how many times it has run is a trap either way.
+#
+# So: clear what Heppa previously contributed, merge, then label the rest.
+# `resultSource` is the provenance marker that makes step 1 possible, which is
+# also why the merge stays away from `winOddsFinal` — one marker cannot honestly
+# describe two columns that can come from different sources on the same row.
+# Heppa's final win odd is in `heppa_start.winOdd` for cross-checking; the
+# archive's own odds stay purely Veikkaus, where the whole odds history lives.
+RESET_HEPPA_CONTRIBUTION = """
+    UPDATE archive.start
+    SET placement = CASE WHEN resultSource = 'heppa' THEN NULL ELSE placement END,
+        kmTime = CASE WHEN resultSource = 'heppa' THEN NULL ELSE kmTime END,
+        kmTimeMs = CASE WHEN resultSource = 'heppa' THEN NULL ELSE kmTimeMs END,
+        resultSource = NULL,
+        prizeWon = NULL,
+        disqualifiedCode = NULL,
+        gallop = NULL;
+"""
+
+# Veikkaus wins where it has an answer — coalesce, never overwrite — so the
+# paid places keep the value the betting operator published and the other
+# ~195,000 starts get theirs from the registry.
+#
+# prizeWon/disqualifiedCode/gallop are taken unconditionally: Veikkaus has no
+# equivalent of any of them, so there is nothing to coalesce against. Note a
+# disqualified horse gets a code but no placement, and so no resultSource.
+RECOMPUTE_START_FROM_HEPPA = f"""
+    UPDATE archive.start AS s
+    SET placement = coalesce(s.placement, j.placement),
+        kmTime = coalesce(s.kmTime, j.kmTime),
+        kmTimeMs = coalesce(s.kmTimeMs, j.kmTimeMs),
+        prizeWon = j.prizeWon,
+        disqualifiedCode = j.disqualifiedCode,
+        gallop = j.gallop,
+        resultSource = CASE WHEN s.placement IS NULL AND j.placement IS NOT NULL
+                            THEN 'heppa' END
+    FROM ({HEPPA_START_JOIN}) AS j
+    WHERE j.raceId = s.raceId
+      AND j.startNumber = s.startNumber;
+"""
+
+# Everything still placed after the merge came from the Veikkaus payload — the
+# rows Heppa never reached as well as the ones where it agreed but lost the
+# coalesce. Labelling them here rather than in the merge keeps the statement
+# above from having to reason about rows it does not join to.
+LABEL_VEIKKAUS_RESULTS = """
+    UPDATE archive.start SET resultSource = 'veikkaus'
+    WHERE placement IS NOT NULL AND resultSource IS NULL;
+"""
+
 CREATE_INDEXES = (
     'CREATE INDEX IF NOT EXISTS idx_start_horse ON archive.start(horseKey);',
     'CREATE INDEX IF NOT EXISTS idx_race_card ON archive.race(cardId);',
+    'CREATE INDEX IF NOT EXISTS idx_heppa_start_horse ON archive.heppa_start(horseId);',
+)
+
+# Columns added after the tables first shipped. `CREATE TABLE IF NOT EXISTS`
+# leaves an existing archive untouched, so widening it takes an explicit ALTER;
+# `IF NOT EXISTS` makes each one a no-op on a database that already has it.
+ADD_COLUMNS = (
+    'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS prizeWon BIGINT;',
+    'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS disqualifiedCode TEXT;',
+    'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS gallop BOOLEAN;',
+    'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS resultSource TEXT;',
+    'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS heppaHorseId TEXT;',
+    'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS baseKey TEXT;',
+    'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS canonicalKey TEXT;',
 )
 
 
@@ -347,7 +719,9 @@ def create(conn):
     for statement in (CREATE_CARD_TABLE, CREATE_RACE_TABLE, CREATE_HORSE_TABLE,
                       CREATE_START_TABLE, CREATE_ODDS_TABLE, CREATE_STAT_TABLE,
                       CREATE_BETPERCENTAGE_TABLE, CREATE_PREVSTART_TABLE,
-                      *CREATE_INDEXES):
+                      CREATE_HEPPA_EVENT_TABLE, CREATE_HEPPA_RACE_TABLE,
+                      CREATE_HEPPA_START_TABLE, CREATE_HEPPA_HORSE_TABLE,
+                      *ADD_COLUMNS, *CREATE_INDEXES):
         conn.execute(statement)
 
 
@@ -381,6 +755,18 @@ class ArchiveDb:
     def store_prevstarts(self, rows):
         _insert_many(self.conn, INSERT_PREVSTART, rows, PREVSTART_KEY)
 
+    def store_heppa_events(self, rows):
+        _insert_many(self.conn, INSERT_HEPPA_EVENT, rows, HEPPA_EVENT_KEY)
+
+    def store_heppa_races(self, rows):
+        _insert_many(self.conn, INSERT_HEPPA_RACE, rows, HEPPA_RACE_KEY)
+
+    def store_heppa_starts(self, rows):
+        _insert_many(self.conn, INSERT_HEPPA_START, rows, HEPPA_START_KEY)
+
+    def store_heppa_horses(self, rows):
+        _insert_many(self.conn, INSERT_HEPPA_HORSE, rows, HEPPA_HORSE_KEY)
+
     def recompute_start_intervals(self):
         self.conn.execute(RECOMPUTE_START_INTERVAL)
 
@@ -390,6 +776,26 @@ class ArchiveDb:
     def recompute_auto_starts(self):
         self.conn.execute(RECOMPUTE_START_AUTOSTART)
         self.conn.execute(RECOMPUTE_PREV_START_AUTOSTART)
+
+    def recompute_heppa_links(self):
+        """Resolve horse identity between the two sources, both directions.
+
+        Order matters: the horse-level mapping is built from the races both
+        sources cover, then read back to reach the meetings only Heppa has.
+        """
+        self.conn.execute(RECOMPUTE_HEPPA_HORSE_ID)
+        self.conn.execute(RECOMPUTE_HEPPA_START_HORSEKEY)
+        self.conn.execute(RECOMPUTE_HORSE_IDENTITY)
+
+    def recompute_start_from_heppa(self):
+        """Merge the registry's finishing detail into archive.start.
+
+        Three statements, and all three are needed for the result to be a pure
+        function of the two tables rather than of how often this has run.
+        """
+        self.conn.execute(RESET_HEPPA_CONTRIBUTION)
+        self.conn.execute(RECOMPUTE_START_FROM_HEPPA)
+        self.conn.execute(LABEL_VEIKKAUS_RESULTS)
 
 
 def query_horse(db_name: str, name: str, before: str | None = None):

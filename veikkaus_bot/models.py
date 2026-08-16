@@ -1,8 +1,10 @@
-"""Pydantic models for the Veikkaus toto-info API resources.
+"""Pydantic models for the two APIs the pipeline reads.
 
-These mirror the API's nested hierarchy — `Card` → `Race` → `Runner`, with
-`Stat` riding along inside a runner. They validate what the crawler archived;
-nothing here fetches. The API sends Finnish-labeled harness data.
+The Veikkaus toto-info models mirror that API's nested hierarchy — `Card` →
+`Race` → `Runner`, with `Stat` riding along inside a runner. The `Heppa*`
+models at the bottom mirror Hippos's Heppa backend, the official registry that
+supplies the finishing detail Veikkaus never publishes (see heppa.py). They
+validate what the crawler archived; nothing here fetches.
 
 Almost every field is Optional because the live API omits fields depending on
 race state *and* on age: historical payloads are markedly thinner than today's
@@ -16,6 +18,7 @@ from pydantic import BaseModel
 
 
 URL = 'https://www.veikkaus.fi/api/toto-info/v1'
+HEPPA_URL = 'https://heppa.hippos.fi/heppa2_backend'
 
 
 # Cards fetched by date omit the live-progress and EPG blocks that today's
@@ -180,3 +183,229 @@ class Runner(BaseModel):
     stats: dict = {}
     betPercentages: Optional[dict] = None
     prevStarts: list[PrevStart] = []
+
+
+# --- Heppa (Suomen Hippos) --------------------------------------------------
+#
+# The official registry, and the only source that publishes a finishing
+# position for the whole field. Two conventions run through every model below
+# and neither is optional to remember:
+#
+# 1. **Every scalar arrives as a string** — `'1'`, `'2080'`, `'4.44'`. They are
+#    typed `str` here and converted in parse.py, so that `'0'` meaning "no
+#    placing" and `'4.44'` meaning 444 hundredths stay explicit decisions
+#    rather than silent coercions.
+# 2. **`startNumber` is the race number; `programNumber` is the horse's start
+#    number.** Heppa's naming inverts the Veikkaus vocabulary exactly.
+class HeppaEvent(BaseModel):
+    """One race meeting, from `/race/results/{from}/{to}/`.
+
+    `(date, trackCode)` identifies it — verified unique across all 472 events
+    of 2025 — and is what `archive.card` joins to via
+    `upper(card.trackAbbreviation)`.
+    """
+    date: str
+    trackCode: str
+    name: Optional[str] = None
+    startTime: Optional[str] = None
+    eventType: Optional[str] = None       # TOTO*, PAIKALLISRAVI, PONI
+    trackShortname: Optional[str] = None
+    trackName: Optional[str] = None
+    trackCity: Optional[str] = None
+    trackNumber: Optional[str] = None
+    trackType: Optional[str] = None       # KESARATA / TALVIRATA
+    trackCondition: Optional[str] = None
+    temperature: Optional[str] = None
+    meetNumber: Optional[str] = None
+    specialRaceEventName: Optional[str] = None
+    canceled: Optional[bool] = None
+    hasPublishedResults: Optional[bool] = None
+    isFreeToPublish: Optional[bool] = None
+    majorRace: Optional[bool] = None
+    finnishTrack: Optional[bool] = None
+    hoofLeagueRace: Optional[bool] = None
+    finnHorseChampionshipRace: Optional[bool] = None
+    ponyChampionshipRace: Optional[bool] = None
+    divisionFinal: Optional[bool] = None
+    formattedTrackName: Optional[str] = None
+    tototvLink: Optional[str] = None
+
+
+class HeppaRace(BaseModel):
+    """The `race` object inside a `/race/{date}/{trackCode}/races` entry.
+
+    `startForm` (TASOITUSAJO / RYHMALAHTO) is handicap-versus-group and is
+    *not* the CAR/VOLT axis that `archive.race.startType` records — the
+    auto-start signal is the per-horse `distanceCode` on HeppaStart.
+    """
+    date: str
+    trackCode: str
+    startNumber: str                      # the race number
+    raceName: Optional[str] = None
+    categoryNumber: Optional[str] = None
+    plannedTime: Optional[str] = None
+    actualTime: Optional[str] = None
+    startType: Optional[str] = None       # TOTO / ...
+    startForm: Optional[str] = None
+    monte: Optional[bool] = None
+    eventType: Optional[str] = None       # LAMMINVERISET / SUOMENHEVOSET / ...
+    baseDistance: Optional[str] = None
+    levellingHeader: Optional[str] = None
+    firstPrice: Optional[str] = None
+    priceSum: Optional[str] = None
+    trackNumber: Optional[str] = None
+    status: Optional[str] = None
+    specialRace: Optional[bool] = None
+    totoResultsReady: Optional[bool] = None
+    publishFree: Optional[bool] = None
+    finnishTrack: Optional[bool] = None
+    totoTypes: Optional[list] = None
+    tototvLink: Optional[str] = None
+    photo: Optional[dict] = None
+
+
+class HeppaRaceEntry(BaseModel):
+    """One element of the races listing: the race plus its result summary."""
+    race: HeppaRace
+    gameTypes: Optional[list] = None
+    totoResults: Optional[list] = None
+    intermediateTime: Optional[str] = None
+
+
+class HeppaHorse(BaseModel):
+    """A horse in the registry, from `/horse/{horseId}`.
+
+    Everything here is a property of the animal rather than of a race, so
+    nothing in it is time-varying and none of it can leak a result — unlike
+    `/horse/{id}/stats`, which is as-of-now and is deliberately not crawled.
+
+    `registerNo`/`ueln` is the identifier the Veikkaus API has no equivalent
+    of at all, and unlike `horseId` it is meaningful outside Heppa: UELN is
+    international, so it is the join to any other registry.
+
+    `sire` and `dam` are nested `{id, name, registerNo, ...}` objects, kept as
+    dicts here and flattened in parse.py — one generation, which is what this
+    endpoint carries. `/horse/{id}/pedigree` goes back three and is a separate
+    crawl.
+    """
+    id: str
+    name: Optional[str] = None
+    birthDate: Optional[str] = None        # yyyy-mm-dd; exact, unlike birthYear
+    birthDateStr: Optional[str] = None
+    birthDateAccurate: Optional[bool] = None
+    registerNo: Optional[str] = None
+    ueln: Optional[str] = None
+    chipNo: Optional[str] = None
+    dead: Optional[bool] = None
+    registrationSuspended: Optional[bool] = None
+    species: Optional[str] = None
+    breedCode: Optional[str] = None
+    breedFinName: Optional[str] = None
+    gender: Optional[str] = None
+    color: Optional[str] = None            # a plain string here, a dict on Runner
+    birthCountry: Optional[str] = None     # origin — NOT registrationCountry
+    birthCountryName: Optional[str] = None
+    birthPlace: Optional[str] = None
+    origin: Optional[str] = None
+    registrationCountry: Optional[str] = None   # where it races, not where it is from
+    breedingUnion: Optional[str] = None
+    breederName: Optional[str] = None
+    ownerName: Optional[str] = None
+    groomName: Optional[str] = None
+    trainerId: Optional[str] = None
+    trainerName: Optional[str] = None
+    homeTrackName: Optional[str] = None
+    homeTrackCity: Optional[str] = None
+    bestRecord: Optional[str] = None
+    sire: Optional[dict] = None
+    dam: Optional[dict] = None
+    # Modelled to document the payload, never persisted: `age` and
+    # `latestVaccination` are as-of-now, the rest is decoration.
+    age: Optional[str] = None
+    latestVaccination: Optional[str] = None
+    laboratoryNumber: Optional[str] = None
+    dnaCertificate: Optional[bool] = None
+    description: Optional[str] = None
+    victorySong: Optional[str] = None
+    photo: Optional[dict] = None
+    chipNo2: Optional[str] = None
+    racingRenterName: Optional[str] = None
+    owningRenterName: Optional[str] = None
+    breedingRenterName: Optional[str] = None
+    tryOutPointsWithPause: Optional[str] = None
+    tryOutPointsWithoutPause: Optional[str] = None
+
+
+class HeppaStart(BaseModel):
+    """One horse in one race, from `/race/{date}/{trackCode}/start/{raceNo}`.
+
+    This is the row that fills the holes in `archive.start`. Four fields are
+    required because they are what places it — the rest follows the standing
+    rule that a validation error costs the whole row.
+
+    Two traps live in here. `placing` is a string with three regimes ('0' means
+    no placing, '1'-'13' a real one, and >= 100 is 100 + the finishing position
+    of a disqualified horse) — parse.parse_placing() owns that. And
+    `horsePriceSum` is career earnings *including* this race, unlike Veikkaus's
+    pre-race `careerWinnings`, so it leaks the result and must never become an
+    as-of-race-day feature. The same caution applies to `record`.
+    """
+    date: str
+    trackCode: str
+    startNumber: str                      # the race number
+    programNumber: str                    # the horse's start number
+    horseId: Optional[str] = None         # 19-digit; stays a string, not BIGINT
+    horseName: Optional[str] = None
+    horseBreed: Optional[str] = None
+    horseRegistrationCountry: Optional[str] = None
+    lane: Optional[str] = None
+    distance: Optional[str] = None
+    distanceCode: Optional[str] = None    # 'ke'/'ake'/'ly'/'aly'/'akp' — 'a' is an auto start
+    placing: Optional[str] = None
+    disqualifiedCode: Optional[str] = None  # hpl, hll, hlo, hrp, k
+    gallop: Optional[bool] = None
+    absent: Optional[bool] = None
+    kilometerTime: Optional[str] = None       # '1.18.8'
+    shortKilometerTime: Optional[str] = None  # '18,8' — the archive.start format
+    totalTime: Optional[str] = None
+    price: Optional[str] = None           # this race's prize money for this horse
+    winOdds: Optional[str] = None         # '4.44'
+    winOddsStr: Optional[str] = None
+    winOdds2: Optional[str] = None
+    horsePriceSum: Optional[str] = None   # career earnings, post-race
+    record: Optional[str] = None
+    recordType: Optional[str] = None
+    recordMonte: Optional[bool] = None
+    shortRecord: Optional[str] = None
+    carRecord: Optional[str] = None
+    carRecordType: Optional[str] = None
+    carRecordMonte: Optional[bool] = None
+    shortCarRecord: Optional[str] = None
+    driverId: Optional[str] = None
+    driverName: Optional[str] = None
+    driverFirstName: Optional[str] = None
+    driverLastName: Optional[str] = None
+    driverShortFirstName: Optional[str] = None
+    originalDriverId: Optional[str] = None
+    originalDriverFirstName: Optional[str] = None
+    originalDriverLastName: Optional[str] = None
+    originalDriverShortFirstName: Optional[str] = None
+    trainerId: Optional[str] = None
+    trainerName: Optional[str] = None
+    ownerName: Optional[str] = None
+    ownerCity: Optional[str] = None
+    shoesFront: Optional[str] = None      # K / E / X, not Veikkaus's HAS_SHOES
+    shoesBack: Optional[str] = None
+    americanSulkyKEX: Optional[str] = None
+    startForm: Optional[str] = None
+    startType: Optional[str] = None
+    monte: Optional[bool] = None
+    status: Optional[str] = None
+    condition: Optional[str] = None
+    expectedValue: Optional[str] = None
+    commentText: Optional[str] = None
+    testStartAccepted: Optional[str] = None
+    startAmount: Optional[str] = None
+    trainerCommentsUpdated: Optional[bool] = None
+    trackNumber: Optional[str] = None
+    finnishTrack: Optional[bool] = None

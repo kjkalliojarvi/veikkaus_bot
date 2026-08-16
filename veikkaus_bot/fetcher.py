@@ -40,9 +40,17 @@ class CircuitOpen(Exception):
 
 
 class Fetcher:
-    def __init__(self, raw_root: str, delay: float = DEFAULT_DELAY):
+    """One host at a time. `base_url` selects which — the Veikkaus toto-info API
+    by default, Hippos's Heppa backend for the second source (see heppa.py).
+    The rate limit, backoff and circuit breaker are per instance, so two sources
+    never spend each other's politeness budget.
+    """
+
+    def __init__(self, raw_root: str, delay: float = DEFAULT_DELAY,
+                 base_url: str = API_URL):
         self.raw_root = raw_root
         self.delay = delay
+        self.base_url = base_url
         self.consecutive_failures = 0
         self._last_request = 0.0
 
@@ -61,7 +69,7 @@ class Fetcher:
                 time.sleep(pause)
             self._wait()
             try:
-                resp = requests.get(f'{API_URL}{path}', headers=HEADERS, timeout=30)
+                resp = requests.get(f'{self.base_url}{path}', headers=HEADERS, timeout=30)
             except requests.RequestException as e:
                 result = FetchResult(None, None, str(e))
                 continue

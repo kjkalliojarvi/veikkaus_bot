@@ -224,7 +224,7 @@ With this shape, "past performances of horse X before date D" is one indexed que
 
 ### 5b. As implemented
 
-The schema above is DDL-sketch, not the literal build. Three deliberate deviations:
+The schema above is DDL-sketch, not the literal build. Four deliberate deviations:
 
 - **DuckDB, not SQLite.** The repository's storage backend is DuckDB, so the archive lives in
   the same `veikkaus_data.duckdb` file under its own `archive` schema. That keeps the plan's
@@ -236,6 +236,11 @@ The schema above is DDL-sketch, not the literal build. Three deliberate deviatio
 - **`start.horseKey` is `normalize(name)|birthYear`**, where normalize folds case and spacing
   and drops the `*` marker but *keeps* a country tag such as `(SE)` — that tag is precisely
   what separates an import from a same-named domestic horse.
+- **A second source has its own tables.** `heppa_event`, `heppa_race` and `heppa_start` hold
+  the Heppa registry verbatim (§8b), keyed on (meetDate, trackCode[, raceNumber[,
+  programNumber]]) because Heppa exposes no `cardId` or `raceId`. `start` gained `prizeWon`,
+  `disqualifiedCode`, `gallop` and `resultSource`, and `horse` gained `heppaHorseId`; all five
+  are written NULL by the parser and derived afterwards, like `startInterval` before them.
 
 **Parsing traps to handle deliberately** (unit-test these): Finnish km-time notation (`14,5a` = 1:14.5 with auto start; `a` suffix and gallop marks), result codes for disqualified/broke/did-not-finish starts (hylätty, keskeytti, poisjäänyt), volt-start distance handicaps (a 2140 m runner in a "2100 m" race), and cancelled races/cards.
 
@@ -253,9 +258,317 @@ A small daily job keeps the dataset current and — critically for ML — captur
 
 The daily cycle: in the morning, fetch `/cards/today` (and tomorrow's date) and store the entry lists — this is the "as-known-before-the-race" snapshot, including scratches as they appear. If you want odds as a feature, poll each race's win pool a few times in the final ~30 minutes before its start (e.g. T-30, T-10, T-2) into `odds_snapshot`; historical endpoints will most likely give you only final odds, so forward collection is the only way to get odds trajectories. Then, 1–2 hours after each card finishes, re-fetch the runners for every race to pick up official results, and re-fetch once more the next morning to catch late corrections/protests. Schedule it with cron/systemd on any always-on machine; the job is a few hundred requests per day at most.
 
+### 7b. The recommended cycle, as the commands actually behave
+
+§7 assumed results could be re-fetched at will. They cannot, and the reason shapes everything else.
+
+**A `done` task is never fetched again.** `enqueue` uses `INSERT OR IGNORE`, and `--retry-failed`
+resets only `failed` — `done` and `missing` are permanent. Combined with the fact that **a race that
+has not run answers `/race/{raceId}/results` with HTTP 200**, `raceStatus: OPEN` and an empty
+`results` list, crawling a card before its racing is final marks it complete and loses those placings
+from the Veikkaus side for good. Verified live on 2026-08-16.
+
+So the cycle pins `--from` and moves only `--to`, which must lag reality:
+
+```bash
+LAST=$(date -v-2d +%F)
+uv run veikkaus backfill --from 2021-01-01 --to "$LAST"
+uv run veikkaus heppa    --from 2021-01-01 --to "$LAST"
+uv run veikkaus heppa-horses      # reads the previous cycle's parse; new horses lag one run
+uv run veikkaus parse
+```
+
+**Heppa is the safety net, because it self-heals and Veikkaus does not.** Its month-listing task id
+contains the actual date range, so the current month is re-listed every run, and `expand()` only
+follows meetings whose `hasPublishedResults` is true — a meeting crawled too early is not crawled at
+all until its results exist. A premature Veikkaus card therefore still recovers its placings; what is
+lost is that day's odds and betting percentages, which have to be captured live regardless.
+
+Two things this cycle needed, both now built and described below.
+
+### 7c. Incremental parse (built)
+
+`parse` re-reads and re-validates the entire raw zone on every run — about an hour — while a nightly
+cycle adds perhaps a dozen race days. Measured breakdown over the full archive:
+
+| phase | payloads | cost |
+|---|---|---|
+| `_parse_heppa_starts` | 31,822 | ~35 min |
+| `_parse_runners` | 26,369 | ~31 min |
+| `_odds_map` | 51,045 | ~10 min |
+| everything else | ~21,600 | ~7 min |
+| all five `recompute_*` | whole tables | **0.3 s** |
+
+The cost is **per payload and it is Pydantic validation, not I/O** — a gzipped read is ~3 ms of the
+~70 ms a runners payload takes. So skipping already-parsed payloads is the whole win, and the
+recomputes should stay whole-table: they are free, and being whole-table is what makes them
+deterministic.
+
+**Mechanism: a `parsedAt` column on the manifest.**
+
+- `ALTER TABLE archive.manifest ADD COLUMN IF NOT EXISTS parsedAt TEXT`, alongside the existing
+  `ADD_COLUMNS` migrations.
+- `_each_payload` selects `status = 'done' AND (parsedAt IS NULL OR parsedAt < fetchedAt)`.
+- Each phase stamps `parsedAt` for the tasks it consumed, in one `executemany` after its final
+  forced flush. A crash mid-phase re-does that phase, which is safe because every upsert is
+  idempotent.
+- `parse --full` ignores `parsedAt`, for re-parsing after a parser change. **This is the one manual
+  step the design keeps** — changing a `*_record()` builder without `--full` silently leaves old rows
+  in place.
+
+Comparing `parsedAt` against `fetchedAt` rather than keeping a single global watermark is what makes
+this compose with §7d: a re-fetched row gets a newer `fetchedAt` and is re-parsed automatically.
+
+**The dependency that makes it non-trivial.** `_parse_runners` needs the results and odds maps for
+the races it is parsing, and those payloads will usually already be parsed. Two fixes, both
+worthwhile on their own:
+
+- **Scope `_results_map` to the work in hand** rather than building it from unparsed payloads: take
+  the pending runners tasks, read the `results` payloads for their `entityId` (the raceId) and the
+  `races` payloads for their `cardId` — both columns are already on every manifest row. A dozen cards
+  is a handful of files.
+- **Read final win odds from `archive.odds_snapshot` instead of rebuilding them in memory.** They are
+  already stored there; `_odds_map` currently does two unrelated jobs, and splitting them removes the
+  dependency entirely. It is also *more* correct: picking the latest `capturedAt` per
+  (raceId, startNumber) is deterministic, where the current in-memory map keeps whichever payload
+  happened to be iterated last. Flag it as a deliberate behaviour change.
+
+`_parse_heppa_starts`, `_parse_heppa_horses` and the rest have no cross-payload dependency and become
+incremental for free.
+
+**Expected result:** a nightly cycle drops from ~60 min to seconds.
+
+**Tests.** Parse twice and assert the second run reports zero of everything and leaves the tables
+byte-identical; bump one row's `fetchedAt` and assert exactly that payload re-parses; assert `--full`
+re-parses everything; assert a runners payload parsed in isolation still picks up its placings, which
+is the regression the scoped `_results_map` risks.
+
+### 7d. `--refetch-from` (built)
+
+Recovering an early crawl currently means hand-written `DELETE FROM archive.manifest`. Replace it
+with an explicit window reset on `backfill` and `heppa`:
+
+```
+--refetch-from D [--refetch-to D]      # --refetch-to defaults to --refetch-from
+```
+
+A **separate window from `--from`/`--to`** on purpose: the recommended cycle pins `--from` at
+2021-01-01, so a `--refetch` flag reusing that window would silently re-crawl five years.
+
+Shared implementation on `Manifest`, so both sources get identical semantics:
+
+```python
+def reset_window(self, first: str, last: str, types: tuple) -> int:
+    """Mark a date range fetchable again. Returns the number of rows reset."""
+```
+
+```sql
+UPDATE archive.manifest SET status = 'pending'
+WHERE meetDate BETWEEN ? AND ? AND endpointType IN (…) AND status <> 'pending'
+```
+
+Points that matter:
+
+- **Restricted to the calling source's endpoint types**, so `backfill --refetch-from` cannot reset
+  Heppa rows.
+- Resets `missing` and `failed` as well as `done` — recovering a mis-timed crawl is the whole point.
+- Every Veikkaus and Heppa *meeting* task carries `meetDate`, so a date range reaches parents and
+  children alike, and re-expansion is harmless because the children are pending too.
+- `heppa_horse` has a NULL `meetDate` and is correctly never touched — a horse is not dated.
+- `heppa_results` month tasks sit on the month's first day, so a mid-month window misses them. That
+  is fine: their id encodes the range, so the current month is re-listed anyway.
+- **Raw files are not deleted.** They are overwritten on success, so a re-crawl that fails leaves the
+  previous archive intact.
+- Print the number of rows reset before crawling, so an over-wide window is visible rather than
+  silently expensive.
+
+It composes with §7c for free: reset rows get a new `fetchedAt`, which is newer than their
+`parsedAt`, so the next `parse` picks up exactly those. One caveat to document — re-parsing a payload
+whose *contents* changed upserts the new rows but does not delete rows that vanished (a withdrawn
+start number, say). That is a pre-existing property of `INSERT OR REPLACE`, not something this
+introduces.
+
+**Tests.** The reset touches only the window and only the calling source's types; a `done` row inside
+becomes pending and one outside does not; `heppa_horse` rows are never reset; the count returned
+matches the rows changed.
+
+### 7e. What shipped differently
+
+One correction to §7c, found by the tests rather than by reasoning. Comparing `parsedAt < fetchedAt`
+is not enough on its own: both stamps are second-resolution, so a re-fetch landing in the same second
+as the parse before it would be missed silently. `Manifest.mark()` therefore **clears `parsedAt` on
+every fetch** — the payload on disk has just been replaced, so whatever was loaded from it is stale by
+definition. The timestamp comparison survives as a backstop for a `fetchedAt` that moved some other
+way. That also makes `reset_window()` simpler than designed: it does not touch `parsedAt` at all,
+because a reset row is only re-parsed once it has actually been re-fetched, so a failed re-crawl
+leaves the loaded data alone.
+
+### 7f. Verification
+
+The change alters how `archive.start` gets its finishing detail and its win odds, so the standard to
+meet was that a full rebuild produces byte-identical tables — not merely plausible ones.
+
+**The first attempt did not meet it, and the flaw is worth recording.** It rebuilt into a *copy of
+production*, so the tables already held production's rows and the parse upserted over them. That
+proves nothing was overwritten with a different value, but it cannot prove the new code writes every
+row production has: a parse that silently emitted a subset would leave the older rows in place and
+diff clean. Seeding a verification from the thing it is verifying is a comfortable mistake to make.
+
+The real check ran `parse --full` against production with a snapshot taken immediately before, and
+compared every table in both directions:
+
+| | |
+|---|---|
+| `start` | 288,051 — 0 added, 0 removed |
+| `heppa_start` | 313,661 — 0 added, 0 removed |
+| `bet_percentage` | 414,780 — 0 added, 0 removed |
+| `odds_snapshot` | 269,010 — 0 added, 0 removed |
+| the other eight tables | 0 added, 0 removed |
+
+So a full re-parse is a no-op on content, which is the property that lets the incremental one be
+trusted. Timings on the real archive: **~80 min for `--full`, 1.6 s for a settled parse**, and about
+eight seconds for one re-fetched race day.
+
+The odds change is inert on today's data rather than merely equivalent in principle: all 250,976
+(race, start) pairs have exactly one win-pool snapshot, so latest-`capturedAt` and last-iterated
+return the same value. It begins to matter only when §7's odds polling starts producing several
+snapshots per runner — which is precisely when the deterministic rule is the one you want.
+
+One asymmetry the stamping leaves behind, by design: 104,539 of the 157,256 manifest rows carry a
+`parsedAt`, and the 52,717 that do not are exactly the `pools` and `results` rows. Those payloads are
+never loaded into a table — they are read as lookups by `_store_odds` and `_results_map` — so there
+is nothing to mark. They cost nothing on a settled archive because both lookups are scoped to
+outstanding work, and there is none.
+
 ## 8. Validation and cross-checking
 
-Trust but verify, per phase. After backfill, run structural checks: every card has races, every non-cancelled official race has runners with results, placings within a race are consistent (unique, gap-free apart from dq/dnf), km times fall in plausible ranges (1:08–1:50), and per-year race counts match the ~5,500–6,500 expectation. Then spot-check ~20 random races against the public results in Hippos's [Heppa system](https://heppa.hippos.fi/heppa/racing/RaceResults.html) — placings, km times and drivers should match exactly; Heppa is the official registry and also your fallback data source if the Veikkaus API is retired in the 2027 market transition. Finally, sanity-check the ML view: pick a well-known horse, pull its reconstructed career line from `start`, and compare with its Heppa career page — this specifically validates the horse-identity resolution of §5.
+Trust but verify, per phase. After backfill, run structural checks: every card has races, every non-cancelled official race has runners with results, placings within a race are consistent (unique, gap-free apart from dq/dnf), km times fall in plausible ranges (1:08–1:50), and per-year race counts match the ~5,500–6,500 expectation. Finally, sanity-check the ML view: pick a well-known horse, pull its reconstructed career line from `start`, and compare with its Heppa career page — this specifically validates the horse-identity resolution of §5.
+
+### 8b. Heppa, as implemented
+
+Heppa was planned here as a manual spot-check and a fallback. It is now a **crawled source in its
+own right** — `veikkaus heppa` — because the gap it fills turned out to be far larger than §2b's
+optimism about `prev_start` allowed for. Of 268,864 starts at Finnish meetings in the 2021→ archive,
+**195,690 had no placing at all**: `prev_start` only recovers a start for a horse that raced again
+*while the card was still current*, so the backfilled years recover essentially nothing (13,271 rows
+against 26,348 races, 84 % of them 2026).
+
+The registry publishes the whole field for every Finnish meeting back to at least 2000, through the
+Mobiiliheppa backend at `https://heppa.hippos.fi/heppa2_backend`: `/race/results/{from}/{to}/` lists
+the meetings in a date range, `/race/{date}/{trackCode}/races` their races, and
+`/race/{date}/{trackCode}/start/{raceNo}` the field. Unauthenticated, and — unlike the Veikkaus
+paths — not disallowed by `robots.txt`, which names only `/heppa/racing`, `/heppa/horse` and
+`/heppa/person`. Roughly 28,000 requests for the 2021→ window, ~16 h at the 2 s delay.
+
+Three things arrive that the Veikkaus API has no equivalent of anywhere: **this race's prize money
+per horse** (`runner.prize` is career earnings, as §2b established), a **disqualification code for
+every start** rather than only for horses that were re-reported, and **stable registry ids** for
+horses, drivers and trainers — which settles the §5 horse-identity problem outright, since
+`horse_key()` is a name-and-birth-year guess and `horseId` is authoritative. Track conditions and
+temperature come along too.
+
+The cross-check §8 asked for is now a query rather than 20 manual lookups — `veikkaus crosscheck`.
+Every start where both sources have a placing is a comparison, and `archive.start.resultSource`
+records which source supplied each one. The merge coalesces — Veikkaus never gets overwritten — so
+a disagreement is visible rather than resolved silently.
+
+Run on the first crawled day (2026-08-08, four meetings, 369 registry starts, 224 of them joining
+to a Veikkaus start), the two sources agreed on **every** overlapping value: 60/60 placings,
+187/187 km times in milliseconds, 224/224 auto-start flags, 209/209 final win odds, 224/224
+scratchings against `absent`. No horse-identity collision in either direction. Savonlinna race 1
+went from 3 placings to 11. Two things the comparison exposed that are worth knowing:
+
+- **Horse names differ on 50 of 224 rows, and that is correct.** Veikkaus appends the country tag
+  (`Kapplans Orlando (SE)`); Heppa keeps it in `horseRegistrationCountry` and leaves the name clean.
+  This is exactly why the bridge between the sources is positional and never name-based.
+- **Km-time *strings* differ on 30 of 60**, because Veikkaus carries the start-type and equipment
+  markers (`31,5x`, `m18,5a`) and Heppa's short form is bare. The parsed `kmTimeMs` agrees
+  everywhere. After the merge `archive.start.kmTime` is therefore not uniform; analyse on
+  `kmTimeMs` and `autoStart`.
+
+Two real Finnish cards have no Heppa event at all — Vermo 2025-08-16 and Kaustinen 2024-03-24 — and
+are the whole residue of the track-vocabulary work once `Hr2` was aliased to `HR`. A third appearing
+in `crosscheck` is something new rather than a known gap.
+
+That 224/224 auto-start agreement is itself a result: it independently confirms that the `a` prefix
+on Heppa's per-horse `distanceCode` means the same thing as `race.startType = 'CAR_START'`.
+
+### 8c. What the full crawl found
+
+The complete 2021→ crawl (68 monthly listings, 2,779 meetings, 31,822 races, no failures) took the
+unplaced non-scratched starts at real Finnish meetings from **177,817 to 34,450**, of which 29,434
+carry a disqualification code — so what is genuinely unknown fell to about **5,000, under 2 %**.
+Over the 72,336 starts where both sources have a placing they agree on **72,320**, and the
+disagreements are all explicable: 16 are post-race disqualifications where Veikkaus records the
+*payout* order and Heppa the *official* one, 106 are km times differing by a tenth on a rounding
+convention, and 173 are late scratchings that the Veikkaus entry data never recorded.
+
+Two defects surfaced that the smoke test was too small to reach, both now fixed:
+
+- **A track-vocabulary gap cost 28 meetings.** Veikkaus spells Härmä `Hr` *and* `Hr2`; Heppa has
+  only `HR`, so `Hr2` upper-cased to `HR2` and matched nothing, stranding 2,116 recoverable
+  placings. The check that missed it asked whether two cards collide on
+  `(date, upper(abbreviation))` — never whether `Hr2` resolved at all. `crosscheck` now groups
+  unmatched cards by track, where a whole track appearing is the signal.
+- **`horse_key()` split 182 horses across 365 keys**, because Veikkaus writes an import's name
+  inconsistently. `archive.horse.canonicalKey` now resolves identity — registry id first, a
+  marker-free name key as fallback.
+
+That second one is where §5's "keep a manual-review table for collisions" is finally answerable, and
+the rule that settles it is a domain fact rather than a heuristic: **a name never repeats within an
+origin country, but it does repeat across them.** `Elliot` and `Elliot (DK)`, both foaled 2016, are
+two real horses, so the country tag is load-bearing wherever it appears — which is exactly why the
+registry id has to decide first and the name fallback is only allowed to carry the horses the
+registry never reached. It also means `heppa_start.horseRegistrationCountry` is the wrong field for
+this: it records where a horse *races* and reads `FI` for both Elliots. Origin lives in
+`/horse/{id}`'s `birthCountry`.
+
+### 8d. The horse registry
+
+`veikkaus heppa-horses` crawls `/horse/{horseId}` once per horse the meetings turned up — **14,050
+requests, ~7.8 h** — into `archive.heppa_horse`. It is driven by the archive rather than by a date
+window, so it follows a `heppa` crawl and a `parse`, and re-running it later costs only the new
+horses.
+
+It closes §5's remaining gap on breeding rather than on identity: `registerNo` and **`ueln`**
+(international, so the join key to any other registry), an *exact* `birthDate` where `archive.horse`
+has only a year, breeder, colour, breed, and `sireId`/`damId` — a pedigree graph with stable ids
+instead of the name strings the Veikkaus payload carries. `birthCountry` is the origin field the
+same-country name rule needs, and it is emphatically not `registrationCountry`: `In Love Mearas` is
+born SE and registered FI, like every import.
+
+**It does not improve identity resolution, contrary to the expectation that motivated it.** 5,232 of
+the 5,235 horses with no registry id race only on the Swedish simulcast and combination-pool cards,
+and Heppa is the *Finnish* registry — it has no record of them, so there is no `/horse/{id}` to
+fetch. The registry-id path already reaches everything it can. Only 3 id-less horses ever started at
+a real Finnish track.
+
+`/horse/{id}/stats` is deliberately left alone: it is as-of-now, so it would leak results into any
+as-of-race-day feature, and the same numbers are derivable from the start corpus with correct
+point-in-time semantics. `/horse/{id}/pedigree` goes back three generations; it is **out of scope by
+decision** rather than left undone — one generation with stable parent ids covers the modelling this
+archive is for, and the second and third would cost another 14,050 requests. Revisit only if a
+breeding-side question actually needs grandparents.
+
+The crawl completed with **14,050 of 14,050 records and no failures**: exact birth dates and parent
+ids on every horse, UELN on 13,515 (96 %, the rest older imports), breeders on 13,609, and 1,324
+distinct sires. It also validated the archive: all 11,851 birth years that can be checked against an
+exact `birthDate` agree, with zero disagreements.
+
+**It settled the horse-identity question rather than improving it.** With real origin data, a name is
+unique within an origin country only among *contemporaries* — of the 10 name+origin pairs, 9 are a
+name reused a generation later (Consta FI 2019/2021, Lemmy FI 2011/2022, Wallander FI 2010/2020) and
+one, `Editor` FI foaled six weeks apart in 2020, is a genuine same-year pair. Names repeat across
+origins on 8 names. So birth year, not country, is the load-bearing part of the key: **(name, birth
+year) collides on 2 pairs in 14,050 — 0.014 %** — against 10 for (name, origin) and 1 for all three.
+Adding origin would halve the error and is not worth doing, because origin only exists for horses
+that have a registry id, and those never reach the name fallback. §5's identity problem is closed.
+
+**Heppa does not replace the Veikkaus crawl.** It has no odds history (269,010 `odds_snapshot`
+rows) and no betting percentages (414,457 rows), and its horse-level figures are as-of-now rather
+than as-of-race-day: `horsePriceSum` includes the race being reported, where `careerWinnings` is
+the pre-race number. Both crawls stay, and the 2027 fallback argument is now stronger, not weaker —
+the results half of the dataset no longer depends on Veikkaus at all.
 
 ## 9. Phased plan
 
@@ -263,8 +576,10 @@ Trust but verify, per phase. After backfill, run structural checks: every card h
 |---|---|---|---|
 | **0 — Probe** | Verify endpoints & field names (§2 checklist), download `toto.xsd`, determine historical reach and rate-limit behavior, fix the FI-card filter | ½–1 day | **done** — §2b |
 | **1 — Build** | Manifest ledger, fetcher with politeness/backoff, raw-zone writer, parsers + schema, unit tests for km-time/result-code parsing | 2–3 days | **done** — `veikkaus backfill` / `parse` / `status` |
-| **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks + Heppa spot-checks | ~1–2 days wall-clock | not started |
-| **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time | ½ day to set up | not started |
+| **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks | ~1–2 days wall-clock | **done** — 2021-01-01 → 2026-08, 2,701 cards / 26,348 races |
+| **2b — Heppa** | Crawl the registry for the finishing order the Veikkaus API structurally cannot publish (§8b); merge into `start`, resolve horse identity | ~16 h wall-clock | **done** — `veikkaus heppa` |
+| **2c — Registry** | One `/horse/{id}` per horse (§8d): UELN, exact birth date, origin, breeding, parent ids | ~8 h wall-clock | **done** — 14,050/14,050, no failures |
+| **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time. Cycle and its constraints in §7b; incremental parse (§7c) and `--refetch-from` (§7d) **built** | ½ day to set up | scheduling not started |
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 
 One §5 addition made during Phase 1: `archive.prev_start` holds the per-horse career lines
@@ -295,9 +610,9 @@ history is thus a function of backfill depth, and grows as the crawl does.
 
 | Risk | Mitigation |
 |---|---|
-| API restructured/retired in 2027 licensing transition | Backfill early; archive raw JSON; Heppa as fallback source |
+| API restructured/retired in 2027 licensing transition | Backfill early; archive raw JSON; **Heppa now crawled as a second source (§8b)**, so the results half no longer depends on Veikkaus |
 | Historical odds/pools not available far back | Accept results-only history for old years; collect odds forward from now |
-| No stable horse ID in payloads | name+birth-year key, collision review, Heppa as authority |
+| No stable horse ID in payloads | name+birth-year key, **resolved against Heppa's `horseId` (§8b)**, which makes the collision review a query |
 | robots.txt / ToS friction | Slow single-threaded crawl, identifying User-Agent, personal-research scope, consider asking for sanctioned access |
 | Silent schema drift in the API | Raw zone + manifest lets you re-parse; log unknown fields loudly |
 
