@@ -403,10 +403,42 @@ way. That also makes `reset_window()` simpler than designed: it does not touch `
 because a reset row is only re-parsed once it has actually been re-fetched, so a failed re-crawl
 leaves the loaded data alone.
 
-Measured on the full archive: a settled parse drops from ~60 min to under a second, and one
-re-fetched race day costs about eight. The odds change is provably inert on today's data — all
-250,976 (race, start) pairs have exactly one win-pool snapshot, so latest-`capturedAt` and
-last-iterated return the same value.
+### 7f. Verification
+
+The change alters how `archive.start` gets its finishing detail and its win odds, so the standard to
+meet was that a full rebuild produces byte-identical tables — not merely plausible ones.
+
+**The first attempt did not meet it, and the flaw is worth recording.** It rebuilt into a *copy of
+production*, so the tables already held production's rows and the parse upserted over them. That
+proves nothing was overwritten with a different value, but it cannot prove the new code writes every
+row production has: a parse that silently emitted a subset would leave the older rows in place and
+diff clean. Seeding a verification from the thing it is verifying is a comfortable mistake to make.
+
+The real check ran `parse --full` against production with a snapshot taken immediately before, and
+compared every table in both directions:
+
+| | |
+|---|---|
+| `start` | 288,051 — 0 added, 0 removed |
+| `heppa_start` | 313,661 — 0 added, 0 removed |
+| `bet_percentage` | 414,780 — 0 added, 0 removed |
+| `odds_snapshot` | 269,010 — 0 added, 0 removed |
+| the other eight tables | 0 added, 0 removed |
+
+So a full re-parse is a no-op on content, which is the property that lets the incremental one be
+trusted. Timings on the real archive: **~80 min for `--full`, 1.6 s for a settled parse**, and about
+eight seconds for one re-fetched race day.
+
+The odds change is inert on today's data rather than merely equivalent in principle: all 250,976
+(race, start) pairs have exactly one win-pool snapshot, so latest-`capturedAt` and last-iterated
+return the same value. It begins to matter only when §7's odds polling starts producing several
+snapshots per runner — which is precisely when the deterministic rule is the one you want.
+
+One asymmetry the stamping leaves behind, by design: 104,539 of the 157,256 manifest rows carry a
+`parsedAt`, and the 52,717 that do not are exactly the `pools` and `results` rows. Those payloads are
+never loaded into a table — they are read as lookups by `_store_odds` and `_results_map` — so there
+is nothing to mark. They cost nothing on a settled archive because both lookups are scoped to
+outstanding work, and there is none.
 
 ## 8. Validation and cross-checking
 
