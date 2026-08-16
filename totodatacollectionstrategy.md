@@ -304,6 +304,10 @@ went from 3 placings to 11. Two things the comparison exposed that are worth kno
   everywhere. After the merge `archive.start.kmTime` is therefore not uniform; analyse on
   `kmTimeMs` and `autoStart`.
 
+Two real Finnish cards have no Heppa event at all — Vermo 2025-08-16 and Kaustinen 2024-03-24 — and
+are the whole residue of the track-vocabulary work once `Hr2` was aliased to `HR`. A third appearing
+in `crosscheck` is something new rather than a known gap.
+
 That 224/224 auto-start agreement is itself a result: it independently confirms that the `a` prefix
 on Heppa's per-horse `distanceCode` means the same thing as `race.startType = 'CAR_START'`.
 
