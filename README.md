@@ -81,17 +81,18 @@ Heppa is more forgiving, and is the safety net. Its month-listing task id contai
 
 **Why `heppa-horses` comes before `parse`.** It reads horse ids out of `archive.heppa_start`, so it sees the previous cycle's parse. Running it there means new horses lag by one cycle and you pay for one parse instead of two — the right trade for a scheduled job.
 
-**Cost.** The crawls are a few hundred requests. `parse` is the expensive part at roughly an hour, because it re-reads and re-validates the whole raw zone every time; see [Development](#development).
+**Cost.** The whole cycle is a few hundred requests and a `parse` measured in seconds: **`parse` only loads payloads fetched since it last ran.** A settled archive parses in under a second. Use `parse --full` after changing any parser — the manifest records what has been loaded, not what the parser would now produce.
 
-**If a date does get crawled too early**, there is currently no flag for it — reset the manifest rows by hand and re-run:
+**If a date does get crawled too early**, re-fetch it:
 
-```sql
-DELETE FROM archive.manifest
-WHERE meetDate = '2026-08-16'
-  AND endpointType IN ('cards_date','races','runners','results','pools','odds');
+```bash
+uv run veikkaus backfill --from 2021-01-01 --to "$LAST" --refetch-from 2026-08-16
+uv run veikkaus heppa    --from 2021-01-01 --to "$LAST" --refetch-from 2026-08-16
 ```
 
-The raw files are overwritten on the next crawl. Note that `--retry-failed` resets only `failed` rows; `done` and `missing` are permanent.
+`--refetch-from` (with an optional `--refetch-to`, defaulting to the same day) puts that window back in the queue, prints how many rows it reset, and the crawl picks them up. It is a **separate window from `--from`/`--to` on purpose** — the cycle above pins `--from` at 2021-01-01, so a flag reusing that window would re-crawl five years. It touches only the calling source's rows, and only dated ones, so the per-horse registry records are never affected.
+
+The next `parse` then reloads exactly those payloads, because a re-fetch clears their parsed marker. Note `--retry-failed` is a different thing: it resets only `failed` rows, whereas `--refetch-from` recovers `done` and `missing` ones too — and `done` is what an early crawl looks like.
 
 ### Crawl off-peak
 
@@ -152,9 +153,9 @@ make run-tests     # uv run pytest tests
 make dist          # build sdist + wheel
 ```
 
-### Where parse spends its hour
+### Where a full parse spends its hour
 
-Measured over the full archive, so that the next person optimising it starts from data rather than intuition:
+`parse` is incremental, so this is the cost of `--full` — or of the very first run. Measured over the full archive, so that the next person optimising it starts from data rather than intuition:
 
 | phase | payloads | cost |
 |---|---|---|
@@ -166,7 +167,9 @@ Measured over the full archive, so that the next person optimising it starts fro
 
 The cost is **per payload, and it is Pydantic validation rather than I/O** — reading a gzipped file is about 3 ms of the ~70 ms a runners payload takes. The recomputes are free, so keeping them whole-table (which is what makes them deterministic) costs nothing.
 
-That shape is what makes an incremental parse worth building: a nightly cycle touches perhaps a dozen race days, so skipping already-parsed payloads would turn the hour into seconds without changing any of the derivation logic.
+That shape is why the incremental parse works the way it does. A `parsedAt` column on the manifest skips payloads already loaded, so a nightly cycle costs seconds; the `recompute_*` pass still runs over the whole tables every time, because at 0.3 s it is free and being whole-table is exactly what makes it deterministic.
+
+Two dependencies had to be broken for that to be correct. `_results_map` is scoped to the races whose runners are outstanding but still reads *parsed* results payloads, because a newly loaded runners payload needs a results payload loaded long ago. And the final win odds are read back from `archive.odds_snapshot` rather than rebuilt while loading it — which is also the more defensible answer, since latest `capturedAt` wins deterministically where the old in-memory map kept whichever payload was iterated last. On the current archive the two agree exactly: all 250,976 (race, start) pairs have a single win-pool snapshot, so the difference only starts to matter once odds are polled repeatedly before post time.
 
 ## License
 

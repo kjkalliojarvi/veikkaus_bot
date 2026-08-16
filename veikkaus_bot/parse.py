@@ -622,17 +622,46 @@ def _flush(store, rows, force=False):
         rows.clear()
 
 
-def _each_payload(manifest: Manifest, raw_root: str, endpoint_type: str):
-    """Yield (task, payload) for every archived response of one endpoint type."""
-    for task in manifest.done(endpoint_type):
-        payload = read_raw(raw_root, task.rawPath)
+def _read(raw_root: str, task):
+    payload = read_raw(raw_root, task.rawPath)
+    if payload is None:
+        print(f'missing raw file: {task.rawPath}')
+    return payload
+
+
+def _each_payload(manifest: Manifest, raw_root: str, endpoint_type: str,
+                  consumed: list | None = None, unparsed_only: bool = True):
+    """Yield (task, payload) for the archived responses of one endpoint type.
+
+    By default only those a parse still owes work on. Tasks are appended to
+    `consumed` *after* their body has run, so the caller can stamp them once
+    the phase has flushed — see Manifest.mark_parsed.
+    """
+    for task in manifest.done(endpoint_type, unparsed_only):
+        payload = _read(raw_root, task)
         if payload is None:
-            print(f'missing raw file: {task.rawPath}')
             continue
         yield task, payload
+        if consumed is not None:
+            consumed.append(task)
 
 
-def _results_map(manifest: Manifest, raw_root: str) -> dict:
+def _payloads_for(manifest: Manifest, raw_root: str, endpoint_type: str, keep):
+    """Archived responses whose *task* `keep` accepts, parsed or not.
+
+    For the two lookups that have to reach payloads outside the current unit of
+    work — a runners payload needs its race's results however long ago those
+    were loaded. Filtering on the task avoids reading the file to reject it.
+    """
+    for task in manifest.done(endpoint_type):
+        if not keep(task):
+            continue
+        payload = _read(raw_root, task)
+        if payload is not None:
+            yield task, payload
+
+
+def _results_map(manifest: Manifest, raw_root: str, runner_tasks: list) -> dict:
     """(raceId, startNumber) -> placement / km time / final win odds.
 
     Only the first three finishers appear here at all; the API publishes no
@@ -643,15 +672,31 @@ def _results_map(manifest: Manifest, raw_root: str) -> dict:
        paid fewer than three places (a Sija pool that paid two, say).
     2. The results payload adds km time and the final win odd, but only for
        the runners a pool actually paid out on.
+
+    Scoped to the races whose runners are actually being parsed, which on an
+    incremental run is a dozen cards rather than the whole archive. It has to
+    reach *parsed* payloads too — a newly loaded runners payload still needs
+    its race's results, which were loaded long ago — so this reads by task
+    rather than by what is outstanding. Both ids are already on the manifest
+    row: a runners task is keyed by raceId and carries its cardId.
     """
+    race_ids = {int(task.entityId) for task in runner_tasks}
+    card_ids = {task.cardId for task in runner_tasks if task.cardId is not None}
     out: dict[tuple[int, int], dict] = {}
-    for _, payload in _each_payload(manifest, raw_root, 'races'):
+    if not race_ids:
+        return out
+
+    for _, payload in _payloads_for(manifest, raw_root, 'races',
+                                    lambda t: t.cardId in card_ids):
         for race in payload.get('collection', []):
+            if race['raceId'] not in race_ids:
+                continue
             placed = parse_tote_result(race.get('toteResultString'))
             for placement, start_number in enumerate(placed, start=1):
                 out.setdefault((race['raceId'], start_number), {})['placement'] = placement
 
-    for _, payload in _each_payload(manifest, raw_root, 'results'):
+    for _, payload in _payloads_for(manifest, raw_root, 'results',
+                                    lambda t: int(t.entityId) in race_ids):
         race_id = payload.get('raceId')
         if race_id is None:
             continue
@@ -694,21 +739,29 @@ def _captured_at(payload: dict, pool_start_time: int | None) -> int:
     return UNKNOWN_CAPTURE_TIME
 
 
-def _odds_map(manifest: Manifest, raw_root: str, db: ArchiveDb) -> dict:
-    """Store odds snapshots and return (raceId, startNumber) -> final win odds.
+def _store_odds(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                unparsed_only: bool = True) -> int:
+    """Load odds snapshots. Only present when the crawl ran with --odds.
 
-    Only present when the crawl ran with --odds; otherwise the win odds in
-    `archive.start` come from the paid places in the results payload.
+    The pool -> race mapping lives in the sibling pools payload, which will
+    usually already be parsed, so it is read by card rather than by what is
+    outstanding — both task types carry `cardId`.
     """
+    odds_tasks = manifest.done('odds', unparsed_only)
+    if not odds_tasks:
+        return 0
+    cards = {task.cardId for task in odds_tasks if task.cardId is not None}
+
     pool_race, pool_time = {}, {}
-    for task, payload in _each_payload(manifest, raw_root, 'pools'):
+    for task, payload in _payloads_for(manifest, raw_root, 'pools',
+                                       lambda t: t.cardId in cards):
         for pool in payload.get('collection', []):
             pool_race[pool['poolId']] = int(task.entityId)
             pool_time[pool['poolId']] = pool.get('firstRaceStartTime')
 
-    out: dict[tuple[int, int], int] = {}
-    rows = []
-    for _, payload in _each_payload(manifest, raw_root, 'odds'):
+    consumed, rows = [], []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'odds', consumed, unparsed_only):
         pool_id = payload.get('poolId')
         race_id = pool_race.get(pool_id)
         if race_id is None:
@@ -726,17 +779,42 @@ def _odds_map(manifest: Manifest, raw_root: str, db: ArchiveDb) -> dict:
                          odd.get('probable'),
                          odd.get('amount'),
                          bool(odd.get('scratched', False))))
-            if odd.get('probable') is not None:
-                out[(race_id, start_number)] = odd['probable']
+        count += 1
         _flush(db.store_odds, rows)
     _flush(db.store_odds, rows, force=True)
-    return out
+    manifest.mark_parsed(consumed)
+    return count
 
 
-def _parse_cards(manifest: Manifest, raw_root: str, db: ArchiveDb, country: str) -> int:
-    rows = []
+# The final win odd is whatever the win pool last published for a runner.
+# Reading it back from the stored snapshots rather than rebuilding it while
+# loading them decouples `archive.start` from which odds payloads happen to be
+# outstanding — and is the more defensible answer besides: latest `capturedAt`
+# wins, deterministically, where an in-memory map kept whichever payload was
+# iterated last.
+FINAL_WIN_ODDS = """
+    SELECT raceId, startNumber, probable FROM (
+        SELECT raceId, startNumber, probable,
+               row_number() OVER (PARTITION BY raceId, startNumber
+                                  ORDER BY capturedAt DESC) AS rn
+        FROM archive.odds_snapshot
+        WHERE poolType = 'VOI' AND probable IS NOT NULL)
+    WHERE rn = 1
+"""
+
+
+def _final_win_odds(db: ArchiveDb) -> dict:
+    """(raceId, startNumber) -> final win odd, from archive.odds_snapshot."""
+    return {(race_id, start_number): probable
+            for race_id, start_number, probable in db.conn.execute(FINAL_WIN_ODDS).fetchall()}
+
+
+def _parse_cards(manifest: Manifest, raw_root: str, db: ArchiveDb, country: str,
+                 unparsed_only: bool = True) -> int:
+    rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'cards_date'):
+    for task, payload in _each_payload(manifest, raw_root, 'cards_date', consumed,
+                                       unparsed_only):
         for raw in payload.get('collection', []):
             if raw.get('country') != country:
                 continue
@@ -747,13 +825,15 @@ def _parse_cards(manifest: Manifest, raw_root: str, db: ArchiveDb, country: str)
                 print(f'{task.rawPath}: card {raw.get("cardId")}: {e}')
         _flush(db.store_cards, rows)
     _flush(db.store_cards, rows, force=True)
+    manifest.mark_parsed(consumed)
     return count
 
 
-def _parse_races(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
-    rows = []
+def _parse_races(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                 unparsed_only: bool = True) -> int:
+    rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'races'):
+    for task, payload in _each_payload(manifest, raw_root, 'races', consumed, unparsed_only):
         for raw in payload.get('collection', []):
             try:
                 rows.append(race_record(Race(**raw)))
@@ -762,22 +842,26 @@ def _parse_races(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
                 print(f'{task.rawPath}: race {raw.get("raceId")}: {e}')
         _flush(db.store_races, rows)
     _flush(db.store_races, rows, force=True)
+    manifest.mark_parsed(consumed)
     return count
 
 
 def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
-                   results: dict, odds: dict) -> tuple[int, int]:
+                   results: dict, odds: dict,
+                   unparsed_only: bool = True) -> tuple[int, int]:
     """Returns (starts, prev-start records seen — before deduplication).
 
     The prev-start count is reports, not rows: the same start comes back on
     every later race of that horse, and they collapse onto one row.
     """
     horses, starts, stats, betpercentages, prevstarts = [], [], [], [], []
+    consumed = []
     count = 0
     prevstart_count = 0
     unplaceable = 0
     placeholders = 0
-    for task, payload in _each_payload(manifest, raw_root, 'runners'):
+    for task, payload in _each_payload(manifest, raw_root, 'runners', consumed,
+                                       unparsed_only):
         for raw in payload.get('collection', []):
             try:
                 runner = Runner(**raw)
@@ -807,6 +891,7 @@ def _parse_runners(manifest: Manifest, raw_root: str, db: ArchiveDb,
     _flush(db.store_stats, stats, force=True)
     _flush(db.store_betpercentages, betpercentages, force=True)
     _flush(db.store_prevstarts, prevstarts, force=True)
+    manifest.mark_parsed(consumed)
     if placeholders:
         print(f'{placeholders} `Poissa` placeholder runners skipped: vacated start numbers.')
     if unplaceable:
@@ -827,11 +912,13 @@ def _heppa_entries(task, payload) -> list:
     return []
 
 
-def _parse_heppa_events(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
+def _parse_heppa_events(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                        unparsed_only: bool = True) -> int:
     """The meetings listing, including the cancelled and the non-toto ones."""
-    rows = []
+    rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'heppa_results'):
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_results', consumed,
+                                       unparsed_only):
         for day in _heppa_entries(task, payload):
             for raw in day.get('events', []):
                 if not raw.get('finnishTrack'):
@@ -844,13 +931,16 @@ def _parse_heppa_events(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int
                           f'{raw.get("trackCode")}: {e}')
         _flush(db.store_heppa_events, rows)
     _flush(db.store_heppa_events, rows, force=True)
+    manifest.mark_parsed(consumed)
     return count
 
 
-def _parse_heppa_races(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
-    rows = []
+def _parse_heppa_races(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                       unparsed_only: bool = True) -> int:
+    rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'heppa_races'):
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_races', consumed,
+                                       unparsed_only):
         for raw in _heppa_entries(task, payload):
             try:
                 rows.append(heppa_race_record(HeppaRaceEntry(**raw)))
@@ -859,13 +949,16 @@ def _parse_heppa_races(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
                 print(f'{task.rawPath}: race {raw.get("race", {}).get("startNumber")}: {e}')
         _flush(db.store_heppa_races, rows)
     _flush(db.store_heppa_races, rows, force=True)
+    manifest.mark_parsed(consumed)
     return count
 
 
-def _parse_heppa_starts(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
-    rows = []
+def _parse_heppa_starts(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                        unparsed_only: bool = True) -> int:
+    rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'heppa_start'):
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_start', consumed,
+                                       unparsed_only):
         for raw in _heppa_entries(task, payload):
             try:
                 rows.append(heppa_start_record(HeppaStart(**raw)))
@@ -874,14 +967,17 @@ def _parse_heppa_starts(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int
                 print(f'{task.rawPath}: start {raw.get("programNumber")}: {e}')
         _flush(db.store_heppa_starts, rows)
     _flush(db.store_heppa_starts, rows, force=True)
+    manifest.mark_parsed(consumed)
     return count
 
 
-def _parse_heppa_horses(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int:
+def _parse_heppa_horses(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                        unparsed_only: bool = True) -> int:
     """One object per response here, not a list — this endpoint returns a horse."""
-    rows = []
+    rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'heppa_horse'):
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_horse', consumed,
+                                       unparsed_only):
         try:
             rows.append(heppa_horse_record(HeppaHorse(**payload)))
             count += 1
@@ -889,25 +985,41 @@ def _parse_heppa_horses(manifest: Manifest, raw_root: str, db: ArchiveDb) -> int
             print(f'{task.rawPath}: horse {task.entityId}: {e}')
         _flush(db.store_heppa_horses, rows)
     _flush(db.store_heppa_horses, rows, force=True)
+    manifest.mark_parsed(consumed)
     return count
 
 
-def parse_all(db_name: str, raw_root: str, country: str) -> dict:
-    """Walk the raw zone into the archive tables. Idempotent."""
+def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> dict:
+    """Walk the raw zone into the archive tables. Idempotent.
+
+    By default only payloads fetched since they were last loaded — a nightly
+    cycle adds a dozen race days and should not pay for re-validating the whole
+    archive. `full=True` reloads everything, which is what a change to any
+    `*_record()` builder or scalar parser requires: this tracks what has been
+    parsed, not what the parser would produce.
+
+    The recompute_* pass always runs over the whole tables. It costs a fraction
+    of a second, and being whole-table is exactly what makes it deterministic.
+    """
+    unparsed = not full
     with db_ops(db_name) as conn:
         manifest = Manifest(conn)
         manifest.create()
         archive_db.create(conn)
         db = ArchiveDb(conn)
-        results = _results_map(manifest, raw_root)
-        odds = _odds_map(manifest, raw_root, db)
-        cards = _parse_cards(manifest, raw_root, db, country)
-        races = _parse_races(manifest, raw_root, db)
-        starts, prevstarts = _parse_runners(manifest, raw_root, db, results, odds)
-        heppa_events = _parse_heppa_events(manifest, raw_root, db)
-        heppa_races = _parse_heppa_races(manifest, raw_root, db)
-        heppa_starts = _parse_heppa_starts(manifest, raw_root, db)
-        heppa_horses = _parse_heppa_horses(manifest, raw_root, db)
+        # The runners still outstanding decide how much of the results lookup
+        # has to be built, so they are resolved before anything is loaded.
+        runner_tasks = manifest.done('runners', unparsed)
+        results = _results_map(manifest, raw_root, runner_tasks)
+        _store_odds(manifest, raw_root, db, unparsed)
+        odds = _final_win_odds(db)
+        cards = _parse_cards(manifest, raw_root, db, country, unparsed)
+        races = _parse_races(manifest, raw_root, db, unparsed)
+        starts, prevstarts = _parse_runners(manifest, raw_root, db, results, odds, unparsed)
+        heppa_events = _parse_heppa_events(manifest, raw_root, db, unparsed)
+        heppa_races = _parse_heppa_races(manifest, raw_root, db, unparsed)
+        heppa_starts = _parse_heppa_starts(manifest, raw_root, db, unparsed)
+        heppa_horses = _parse_heppa_horses(manifest, raw_root, db, unparsed)
         db.recompute_start_intervals()
         db.recompute_prev_start_coaches()
         db.recompute_auto_starts()
@@ -924,6 +1036,8 @@ def parse_all(db_name: str, raw_root: str, country: str) -> dict:
 
 def parse(args):
     """CLI handler: parse the raw zone into the archive tables."""
-    counts = parse_all(args.db, args.raw, args.country)
+    counts = parse_all(args.db, args.raw, args.country, getattr(args, 'full', False))
     for name, count in counts.items():
         print(f'{count} {name} parsed into {args.db}.')
+    if not any(counts.values()):
+        print('Nothing new to parse. Use --full to reload the whole raw zone.')

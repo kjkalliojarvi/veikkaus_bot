@@ -42,13 +42,21 @@ CREATE_MANIFEST_TABLE = """
         fetchedAt TEXT,
         attempts BIGINT,
         error TEXT,
+        parsedAt TEXT,           -- when this payload was last loaded; NULL = never
         PRIMARY KEY (endpointType, entityId));
 """
+
+# Added after the table first shipped; CREATE TABLE IF NOT EXISTS will not
+# widen an existing manifest, and IF NOT EXISTS makes this a no-op on one that
+# already has it.
+ADD_MANIFEST_COLUMNS = (
+    'ALTER TABLE archive.manifest ADD COLUMN IF NOT EXISTS parsedAt TEXT;',
+)
 
 # Never clobbers a row that is already done — re-enqueueing is a no-op.
 INSERT_TASK = """
     INSERT OR IGNORE INTO archive.manifest
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 0, NULL);
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 0, NULL, NULL);
 """
 
 
@@ -61,6 +69,8 @@ class Manifest:
     def create(self):
         self.conn.execute(CREATE_SCHEMA)
         self.conn.execute(CREATE_MANIFEST_TABLE)
+        for statement in ADD_MANIFEST_COLUMNS:
+            self.conn.execute(statement)
 
     def enqueue(self, tasks: list[Task]):
         if tasks:
@@ -77,10 +87,18 @@ class Manifest:
         return [Task(*row) for row in rows]
 
     def mark(self, task: Task, status: str, http_code, error):
+        """Record the outcome of a fetch, and forget that it was ever parsed.
+
+        Clearing `parsedAt` is what makes a re-fetch authoritative: the payload
+        on disk has just been replaced, so whatever was loaded from it is stale
+        by definition. Leaving it to the `parsedAt < fetchedAt` comparison
+        alone would lose a re-fetch that landed in the same second as the parse
+        before it, both stamps being second-resolution.
+        """
         self.conn.execute(
             """UPDATE archive.manifest
                SET status = ?, httpCode = ?, fetchedAt = ?, attempts = attempts + 1,
-                   error = ?
+                   error = ?, parsedAt = NULL
                WHERE endpointType = ? AND entityId = ?""",
             (status, http_code, datetime.now().isoformat(timespec='seconds'), error,
              task.endpointType, task.entityId))
@@ -99,14 +117,61 @@ class Manifest:
             """SELECT endpointType, status, count(*) FROM archive.manifest
                GROUP BY endpointType, status ORDER BY endpointType, status""").fetchall()
 
-    def done(self, endpoint_type: str) -> list[Task]:
-        """Every successfully fetched row of one endpoint type, oldest date first."""
+    def done(self, endpoint_type: str, unparsed_only: bool = False) -> list[Task]:
+        """Every successfully fetched row of one endpoint type, oldest date first.
+
+        `unparsed_only` narrows it to what a parse still owes work on. A
+        re-fetch clears `parsedAt` outright (see `mark`), so the NULL branch is
+        what normally catches a row put back through the crawl by
+        `reset_window()`. The timestamp comparison is the backstop for a
+        `fetchedAt` that moved some other way.
+        """
+        unparsed = 'AND (parsedAt IS NULL OR parsedAt < fetchedAt)' if unparsed_only else ''
         rows = self.conn.execute(
-            """SELECT endpointType, entityId, url, rawPath, meetDate, cardId, stage
-               FROM archive.manifest
-               WHERE endpointType = ? AND status = 'done'
-               ORDER BY meetDate ASC""", (endpoint_type,)).fetchall()
+            f"""SELECT endpointType, entityId, url, rawPath, meetDate, cardId, stage
+                FROM archive.manifest
+                WHERE endpointType = ? AND status = 'done' {unparsed}
+                ORDER BY meetDate ASC""", (endpoint_type,)).fetchall()
         return [Task(*row) for row in rows]
+
+    def mark_parsed(self, tasks: list[Task]):
+        """Record that these payloads have been loaded.
+
+        Called once per phase, *after* its final flush: a crash between the two
+        re-does the phase, which is safe because every upsert is idempotent,
+        whereas stamping first would lose the rows silently.
+        """
+        if tasks:
+            now = datetime.now().isoformat(timespec='seconds')
+            self.conn.executemany(
+                """UPDATE archive.manifest SET parsedAt = ?
+                   WHERE endpointType = ? AND entityId = ?""",
+                [(now, t.endpointType, t.entityId) for t in tasks])
+
+    def reset_window(self, first: str, last: str, types: tuple) -> int:
+        """Make a date range fetchable again. Returns the number of rows reset.
+
+        The recovery for a card crawled before its racing was final: a `done`
+        task is otherwise never fetched again, and a race that has not run
+        still answers with HTTP 200 and an empty result list.
+
+        Restricted to one source's endpoint types, so refetching a Veikkaus
+        window cannot disturb the Heppa rows sharing this manifest. Rows with
+        no `meetDate` — the per-horse registry records — are never in a date
+        range and are correctly left alone.
+
+        `missing` and `failed` are reset alongside `done`: recovering a
+        mis-timed crawl is the whole point, and 'nothing there' is exactly what
+        an early fetch looks like.
+        """
+        placeholders = ', '.join('?' * len(types))
+        rows = self.conn.execute(
+            f"""UPDATE archive.manifest SET status = 'pending'
+                WHERE meetDate BETWEEN ? AND ?
+                  AND endpointType IN ({placeholders})
+                  AND status <> 'pending'
+                RETURNING 1""", (first, last, *types)).fetchall()
+        return len(rows)
 
 
 def dates(start: date, end: date) -> list[date]:
@@ -193,6 +258,24 @@ def crawl(manifest: Manifest, fetcher: Fetcher, expander, types: tuple = VEIKKAU
                 print(f'{fetched} fetched, at {where} ({task.endpointType})', flush=True)
 
 
+def refetch_window(args, manifest: Manifest, types: tuple):
+    """Apply --refetch-from/--refetch-to, if given. Shared by both sources.
+
+    Deliberately a separate window from --from/--to: the recommended update
+    cycle pins --from at the start of the archive, so a flag reusing that
+    window would quietly re-crawl years.
+    """
+    if not getattr(args, 'refetch_start', None):
+        return
+    first = args.refetch_start
+    last = args.refetch_end or first
+    if first > last:
+        print('--refetch-from must not be after --refetch-to.')
+        return
+    count = manifest.reset_window(first, last, types)
+    print(f'{count} manifest rows in {first}..{last} reset to pending.')
+
+
 def backfill(args):
     """CLI handler: enqueue a date window and crawl it, newest date first."""
     start = datetime.strptime(args.start, '%Y-%m-%d').date()
@@ -205,6 +288,7 @@ def backfill(args):
         manifest = Manifest(conn)
         manifest.create()
         manifest.enqueue([cards_task(d) for d in dates(start, end)])
+        refetch_window(args, manifest, VEIKKAUS_TYPES)
         if args.retry_failed:
             print(f'{manifest.retry_failed()} failed rows reset to pending.')
         try:

@@ -53,6 +53,12 @@ def veikkaus():
                                  help='Stop after N fetches (for a trial run)')
     parser_backfill.add_argument('--retry-failed', action='store_true',
                                  help='Reset failed manifest rows to pending before crawling')
+    parser_backfill.add_argument('--refetch-from', dest='refetch_start', default=None,
+                                 help='Re-fetch this date even if already crawled '
+                                      '(recovers a card crawled before its racing was final)')
+    parser_backfill.add_argument('--refetch-to', dest='refetch_end', default=None,
+                                 help='Last date of the re-fetch window '
+                                      '(default: --refetch-from)')
     parser_backfill.set_defaults(func=backfill)
 
     parser_heppa = subparser.add_parser(
@@ -71,6 +77,13 @@ def veikkaus():
                               help='Stop after N fetches (for a trial run)')
     parser_heppa.add_argument('--retry-failed', action='store_true',
                               help='Reset failed manifest rows to pending before crawling')
+    parser_heppa.add_argument('--refetch-from', dest='refetch_start', default=None,
+                              help='Re-fetch this date even if already crawled '
+                                   '(recovers a meeting crawled before its results '
+                                   'were published)')
+    parser_heppa.add_argument('--refetch-to', dest='refetch_end', default=None,
+                              help='Last date of the re-fetch window '
+                                   '(default: --refetch-from)')
     parser_heppa.set_defaults(func=heppa_backfill)
 
     parser_hhorses = subparser.add_parser(
@@ -96,6 +109,9 @@ def veikkaus():
     parser_parse.add_argument('--db', default=DEFAULT_DB,
                               help=f'DuckDB database file (default: {DEFAULT_DB})')
     parser_parse.add_argument('--country', default='FI', help='Card country filter (default: FI)')
+    parser_parse.add_argument('--full', action='store_true',
+                              help='Reload every archived payload, not just the ones fetched '
+                                   'since the last parse. Needed after changing a parser')
     parser_parse.set_defaults(func=parse)
 
     parser_status = subparser.add_parser('status', help='Show crawl manifest progress')

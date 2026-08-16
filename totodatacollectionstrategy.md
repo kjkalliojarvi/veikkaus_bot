@@ -284,9 +284,9 @@ follows meetings whose `hasPublishedResults` is true — a meeting crawled too e
 all until its results exist. A premature Veikkaus card therefore still recovers its placings; what is
 lost is that day's odds and betting percentages, which have to be captured live regardless.
 
-Two things this cycle wants that do not exist yet, designed below.
+Two things this cycle needed, both now built and described below.
 
-### 7c. Design: incremental parse
+### 7c. Incremental parse (built)
 
 `parse` re-reads and re-validates the entire raw zone on every run — about an hour — while a nightly
 cycle adds perhaps a dozen race days. Measured breakdown over the full archive:
@@ -343,7 +343,7 @@ byte-identical; bump one row's `fetchedAt` and assert exactly that payload re-pa
 re-parses everything; assert a runners payload parsed in isolation still picks up its placings, which
 is the regression the scoped `_results_map` risks.
 
-### 7d. Design: `--refetch-from`
+### 7d. `--refetch-from` (built)
 
 Recovering an early crawl currently means hand-written `DELETE FROM archive.manifest`. Replace it
 with an explicit window reset on `backfill` and `heppa`:
@@ -391,6 +391,22 @@ introduces.
 **Tests.** The reset touches only the window and only the calling source's types; a `done` row inside
 becomes pending and one outside does not; `heppa_horse` rows are never reset; the count returned
 matches the rows changed.
+
+### 7e. What shipped differently
+
+One correction to §7c, found by the tests rather than by reasoning. Comparing `parsedAt < fetchedAt`
+is not enough on its own: both stamps are second-resolution, so a re-fetch landing in the same second
+as the parse before it would be missed silently. `Manifest.mark()` therefore **clears `parsedAt` on
+every fetch** — the payload on disk has just been replaced, so whatever was loaded from it is stale by
+definition. The timestamp comparison survives as a backstop for a `fetchedAt` that moved some other
+way. That also makes `reset_window()` simpler than designed: it does not touch `parsedAt` at all,
+because a reset row is only re-parsed once it has actually been re-fetched, so a failed re-crawl
+leaves the loaded data alone.
+
+Measured on the full archive: a settled parse drops from ~60 min to under a second, and one
+re-fetched race day costs about eight. The odds change is provably inert on today's data — all
+250,976 (race, start) pairs have exactly one win-pool snapshot, so latest-`capturedAt` and
+last-iterated return the same value.
 
 ## 8. Validation and cross-checking
 
@@ -531,7 +547,7 @@ the results half of the dataset no longer depends on Veikkaus at all.
 | **2 — Backfill** | Run newest→oldest over 3–5 years; monitor; then run §8 structural checks | ~1–2 days wall-clock | **done** — 2021-01-01 → 2026-08, 2,701 cards / 26,348 races |
 | **2b — Heppa** | Crawl the registry for the finishing order the Veikkaus API structurally cannot publish (§8b); merge into `start`, resolve horse identity | ~16 h wall-clock | **done** — `veikkaus heppa` |
 | **2c — Registry** | One `/horse/{id}` per horse (§8d): UELN, exact birth date, origin, breeding, parent ids | ~8 h wall-clock | **done** — 14,050/14,050, no failures |
-| **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time. Cycle and its constraints worked out in §7b; incremental parse (§7c) and `--refetch-from` (§7d) designed, not built | ½ day to set up | not started |
+| **3 — Incremental** | Daily cron: entries + results re-fetch; optional odds snapshots near post time. Cycle and its constraints in §7b; incremental parse (§7c) and `--refetch-from` (§7d) **built** | ½ day to set up | scheduling not started |
 | **4 — Features** | Build the ML feature layer on top of `start` (last-5 form, km-time trends, driver/trainer stats, class moves, distance/start-type splits) — strictly time-aware (only data available before each race) | ongoing | not started |
 
 One §5 addition made during Phase 1: `archive.prev_start` holds the per-horse career lines

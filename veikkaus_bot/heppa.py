@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta
 
 from . import archive_db
 from .archive_db import db_ops
-from .crawler import Manifest, Task, crawl
+from .crawler import Manifest, Task, crawl, refetch_window
 from .fetcher import CircuitOpen, Fetcher
 from .models import HEPPA_URL
 
@@ -151,6 +151,7 @@ def backfill(args):
         manifest = Manifest(conn)
         manifest.create()
         manifest.enqueue([results_task(first, last) for first, last in months(start, end)])
+        refetch_window(args, manifest, HEPPA_TYPES)
         if args.retry_failed:
             print(f'{manifest.retry_failed(HEPPA_TYPES)} failed rows reset to pending.')
         try:
