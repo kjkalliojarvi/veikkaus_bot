@@ -13,17 +13,19 @@ HEPPA_START_COLUMNS = archive_db.INSERT_HEPPA_START.count('?')
 HORSE_COLUMNS = archive_db.INSERT_HORSE.count('?')
 
 
-def prevstart(prior_start_id, horse_key, meet_date, race_number=1):
+def prevstart(prior_start_id, horse_key, meet_date, race_number=1, result=None):
     """A prev_start row with only the columns this test cares about set."""
     row = [None] * PREVSTART_COLUMNS
     row[0], row[1], row[2], row[6] = prior_start_id, horse_key, meet_date, race_number
+    row[12] = result
     return tuple(row)
 
 
 def start(race_id, start_number, horse_key, coach_name, auto_start=None,
-          placement=None, km_time=None, win_odds=None):
+          placement=None, km_time=None, win_odds=None, scratched=None):
     row = [None] * START_COLUMNS
     row[0], row[1], row[3], row[6] = race_id, start_number, horse_key, coach_name
+    row[15] = scratched
     row[17], row[18] = placement, km_time
     row[20], row[21] = auto_start, win_odds
     return tuple(row)
@@ -50,12 +52,12 @@ def horse(horse_key, base_key=None, name=None):
 
 def heppa_start(meet_date, track_code, race_number, program_number, horse_id=None,
                 placement=None, km_time=None, win_odd=None, prize_won=None,
-                disqualified_code=None, gallop=None):
+                disqualified_code=None, gallop=None, absent=None):
     """A heppa_start row with only the columns this test cares about set."""
     row = [None] * HEPPA_START_COLUMNS
     row[0], row[1], row[2], row[3] = meet_date, track_code, race_number, program_number
     row[5] = horse_id
-    row[13], row[14], row[15] = placement, disqualified_code, gallop
+    row[13], row[14], row[15], row[16] = placement, disqualified_code, gallop, absent
     row[17], row[21], row[22] = km_time, prize_won, win_odd
     return tuple(row)
 
@@ -514,3 +516,269 @@ def test_every_horse_gets_an_identity_even_with_no_base_key(db):
     db.conn.execute("INSERT INTO archive.horse (horseKey) VALUES ('orphan|2020')")
     db.recompute_heppa_links()
     assert identities(db) == {'orphan|2020': 'orphan|2020'}
+
+
+# --- cross-source start intervals --------------------------------------------
+#
+# `startInterval` on archive.start and archive.heppa_start is the layoff
+# feature: days since the horse's previous known start, over the union of all
+# three start-bearing tables. Distinct from prev_start's own same-table column
+# above, which these must leave alone.
+#
+# Every fixture here stores an archive.horse row and calls
+# recompute_heppa_links() first, via recompute(). canonicalKey is what the
+# window partitions on and heppa_start.horseKey is how a Heppa row enters the
+# union at all, and both are written there.
+
+def start_intervals(db):
+    return {(r, n): v for r, n, v in db.conn.execute(
+        'SELECT raceId, startNumber, startInterval FROM archive.start').fetchall()}
+
+
+def heppa_intervals(db):
+    """Keyed by meet date — one Heppa row per date in these fixtures."""
+    return dict(db.conn.execute(
+        'SELECT meetDate, startInterval FROM archive.heppa_start').fetchall())
+
+
+def veikkaus_start(db, race_id, meet_date, horse_key, number=1, track='SN',
+                   card_id=None, track_number=2, **start_overrides):
+    """One card, one race, one start — the smallest crawled appearance."""
+    card_id = race_id if card_id is None else card_id
+    row = list(card(card_id, meet_date, track_abbreviation=track))
+    row[5] = track_number
+    db.store_cards([tuple(row)])
+    db.store_races([race(race_id, card_id, number)])
+    db.store_starts([start(race_id, 1, horse_key, None, **start_overrides)])
+
+
+def recompute(db):
+    """The production order: identity, then the window that reads it."""
+    db.recompute_heppa_links()
+    db.recompute_cross_source_intervals()
+
+
+def test_a_start_interval_counts_days_since_the_previous_start(db):
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    recompute(db)
+    assert start_intervals(db) == {(10, 1): None, (20, 1): 14}
+
+
+def test_a_heppa_only_meeting_shortens_a_veikkaus_gap(db):
+    """The reason this is a union and not a window over archive.start: a local
+    meeting has no Veikkaus card at all, and missing it does not merely go
+    unrecorded — it inflates the next gap, here from 9 days to 30."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-07-01', 'h|2019')
+    db.store_heppa_starts([
+        heppa_start('2026-06-01', 'SN', 1, 1, horse_id='791350'),    # bridges the id
+        heppa_start('2026-06-22', 'PX', 4, 2, horse_id='791350')])   # local, no card
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] == 9
+    assert heppa_intervals(db)['2026-06-22'] == 21
+
+
+def test_a_prev_start_before_the_crawl_window_shortens_the_first_gap(db):
+    """prev_start is the only source that reaches back before the crawl."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    db.store_prevstarts([prevstart(1, 'h|2019', '2026-05-18', race_number=3, result='4')])
+    recompute(db)
+    assert start_intervals(db)[(10, 1)] == 14
+
+
+def test_the_earliest_known_start_is_null_not_the_epoch_sentinel(db):
+    """A nullable column has somewhere to put "unknowable", so it does not need
+    prev_start's days-since-1970 sentinel. Filter this one with IS NULL."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    recompute(db)
+    assert start_intervals(db)[(10, 1)] is None
+
+
+def test_a_scratched_start_gets_no_interval_and_is_not_a_predecessor(db):
+    """A scratched horse did not start, so the next real gap counts past it."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019', scratched=True)
+    veikkaus_start(db, 30, '2026-06-29', 'h|2019')
+    recompute(db)
+    assert start_intervals(db) == {(10, 1): None, (20, 1): None, (30, 1): 28}
+
+
+def test_heppa_absent_overrules_veikkaus_scratched_being_false(db):
+    """The 175-row case: the runners payload is entry data, so a horse withdrawn
+    at the track is not marked there. Heppa is right, and every source with an
+    opinion has to agree before a key counts as a start."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019', scratched=False)
+    veikkaus_start(db, 30, '2026-06-29', 'h|2019')
+    db.store_heppa_starts([heppa_start('2026-06-15', 'SN', 1, 1,
+                                       horse_id='791350', absent=True)])
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] is None
+    assert start_intervals(db)[(30, 1)] == 28
+
+
+def test_a_prev_start_row_does_not_resurrect_a_start_heppa_calls_absent(db):
+    """prev_start abstains from the vote rather than casting one: it only
+    supplies a date, and it is observed to list entries that were withdrawn."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    veikkaus_start(db, 30, '2026-06-29', 'h|2019')
+    db.store_heppa_starts([heppa_start('2026-06-15', 'SN', 1, 1,
+                                       horse_id='791350', absent=True)])
+    db.store_prevstarts([prevstart(1, 'h|2019', '2026-06-15', race_number=1, result='4')])
+    recompute(db)
+    assert start_intervals(db)[(30, 1)] == 28
+
+
+def test_a_career_line_with_no_result_code_is_not_offered_as_a_start(db):
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    db.store_prevstarts([prevstart(1, 'h|2019', '2026-05-18', race_number=3)])
+    recompute(db)
+    assert start_intervals(db)[(10, 1)] is None
+
+
+def test_two_races_on_one_day_give_a_zero_day_gap(db):
+    """Heats and finals put a horse in two races on one card — a real start
+    twice, and a real zero-day gap. Ordered by race number within the date."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019', number=1, card_id=1)
+    veikkaus_start(db, 20, '2026-06-01', 'h|2019', number=5, card_id=1)
+    recompute(db)
+    assert start_intervals(db) == {(10, 1): None, (20, 1): 0}
+
+
+def test_one_start_seen_by_both_sources_is_still_one_start(db):
+    """Dedup on (canonicalKey, meetDate, raceNumber), or the overlap between the
+    two sources would manufacture a zero-day gap on every bridged race."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    db.store_heppa_starts([heppa_start('2026-06-01', 'SN', 1, 1, horse_id='791350'),
+                           heppa_start('2026-06-15', 'SN', 1, 1, horse_id='791350')])
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] == 14
+    assert heppa_intervals(db) == {'2026-06-01': None, '2026-06-15': 14}
+
+
+def test_intervals_partition_on_canonical_key_not_horse_key(db):
+    """Veikkaus writes an import's name inconsistently, which split 182 horses
+    across 365 keys. On horseKey each fragment would get a career of its own and
+    the second start here would look like a debut."""
+    db.store_horses([horse('humble stance|2018'), horse('humble stance* (fr)|2018')])
+    veikkaus_start(db, 10, '2026-06-01', 'humble stance|2018')
+    veikkaus_start(db, 20, '2026-06-15', 'humble stance* (fr)|2018')
+    db.store_heppa_starts([heppa_start('2026-06-01', 'SN', 1, 1, horse_id='791350'),
+                           heppa_start('2026-06-15', 'SN', 1, 1, horse_id='791350')])
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] == 14
+
+
+def test_cross_source_intervals_do_not_run_across_horses(db):
+    db.store_horses([horse('a|2019'), horse('b|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'a|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'b|2019')
+    recompute(db)
+    assert start_intervals(db) == {(10, 1): None, (20, 1): None}
+
+
+def test_an_unresolved_heppa_horse_key_stays_null(db):
+    """No identity, no career timeline — and no predecessor offered to anyone
+    else's either. On heppa_start, NULL therefore means either "no predecessor"
+    or "no identity"; horseKey IS NOT NULL separates them."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    db.store_heppa_starts([heppa_start('2026-05-18', 'PX', 4, 2, horse_id='999')])
+    recompute(db)
+    assert heppa_intervals(db)['2026-05-18'] is None
+    assert start_intervals(db)[(10, 1)] is None
+
+
+def test_the_cross_source_recompute_is_idempotent(db):
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    recompute(db)
+    once = start_intervals(db)
+    recompute(db)
+    assert start_intervals(db) == once == {(10, 1): None, (20, 1): 14}
+
+
+def test_the_cross_source_recompute_is_deterministic_whatever_the_insert_order(db):
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    recompute(db)
+    assert start_intervals(db) == {(10, 1): None, (20, 1): 14}
+
+
+def test_a_newly_crawled_earlier_start_corrects_a_previously_computed_gap(db):
+    """Crawling backwards is the normal case — newest season first — so a gap
+    has to shorten when its predecessor finally arrives."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] is None
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] == 14
+
+
+def test_a_start_that_stops_qualifying_loses_its_interval(db):
+    """What the reset is for. `UPDATE ... FROM` only touches rows its subquery
+    joins to, so a start that drops out of the timeline — a re-crawl finds Heppa
+    calling it absent — would otherwise keep the gap it had."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019')
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019')
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] == 14
+    db.store_heppa_starts([heppa_start('2026-06-15', 'SN', 1, 1,
+                                       horse_id='791350', absent=True)])
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] is None
+
+
+def test_the_prev_start_interval_column_is_untouched(db):
+    """The two columns answer different questions and disagree on purpose."""
+    db.store_horses([horse('h|2019')])
+    db.store_prevstarts([prevstart(1, 'h|2019', '2026-06-01', race_number=3, result='4')])
+    db.recompute_start_intervals()
+    sentinel = intervals(db)['2026-06-01']
+    assert sentinel > 10000
+    recompute(db)
+    assert intervals(db)['2026-06-01'] == sentinel
+
+
+def test_a_combination_pool_meta_card_is_not_a_start(db):
+    """MM, Sl, T75, KUN, JAA and CIT are not meetings — a meta-card re-lists
+    races that also run under their real track. Counting one put the horse at
+    two tracks on one day and handed the next real start a zero-day gap, which
+    is where 2,475 of 2,806 zero gaps came from before this filter."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019', track='O', track_number=17)
+    veikkaus_start(db, 15, '2026-06-01', 'h|2019', track='MM', number=4, track_number=48)
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019', track='O', track_number=17)
+    recompute(db)
+    assert start_intervals(db)[(20, 1)] == 14        # not 0
+    assert start_intervals(db)[(15, 1)] is None      # the meta-card row itself
+
+
+def test_a_swedish_simulcast_is_a_real_start(db):
+    """The other card with no Heppa counterpart, and the opposite treatment: a
+    simulcast duplicates nothing, so dropping it would inflate the gap."""
+    db.store_horses([horse('h|2019')])
+    veikkaus_start(db, 10, '2026-06-01', 'h|2019', track='O', track_number=17)
+    veikkaus_start(db, 15, '2026-06-08', 'h|2019', track='Bo-V', track_number=57)
+    veikkaus_start(db, 20, '2026-06-15', 'h|2019', track='O', track_number=17)
+    recompute(db)
+    assert start_intervals(db)[(15, 1)] == 7
+    assert start_intervals(db)[(20, 1)] == 7

@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import os
 import signal
 import sys
 
@@ -16,6 +17,25 @@ DEFAULT_RAW = 'data/raw'
 PACKAGE_NAME = 'veikkaus_bot'
 PVM = datetime.datetime.now().strftime("%d%m%Y")
 
+
+
+def require_db(args):
+    """Refuse a --db path that is not already there.
+
+    DuckDB creates a database for whatever path it is handed, so a mistyped
+    --db does not fail — it mints an empty archive, and the command then
+    reports zero of everything as though the work had never been done. One
+    such file turned up in data/ as `veikkaus_data`, the default path minus
+    its suffix, and looked exactly like a 297 MB archive gone missing.
+
+    The crawls and the parse do have to create the database the first time, so
+    they take --create-db and say so. `status` and `crosscheck` only ever read
+    one, so for them there is nothing to opt into.
+    """
+    if os.path.exists(args.db) or getattr(args, 'create_db', False):
+        return
+    hint = ' Pass --create-db to start a new one.' if hasattr(args, 'create_db') else ''
+    sys.exit(f'{PACKAGE_NAME}: no database at {args.db}.{hint}')
 
 
 def register_exit_handler(func):
@@ -59,6 +79,9 @@ def veikkaus():
     parser_backfill.add_argument('--refetch-to', dest='refetch_end', default=None,
                                  help='Last date of the re-fetch window '
                                       '(default: --refetch-from)')
+    parser_backfill.add_argument('--create-db', action='store_true',
+                                 help='Create the database if it is not there yet '
+                                      '(otherwise a missing --db is an error)')
     parser_backfill.set_defaults(func=backfill)
 
     parser_heppa = subparser.add_parser(
@@ -84,6 +107,9 @@ def veikkaus():
     parser_heppa.add_argument('--refetch-to', dest='refetch_end', default=None,
                               help='Last date of the re-fetch window '
                                    '(default: --refetch-from)')
+    parser_heppa.add_argument('--create-db', action='store_true',
+                              help='Create the database if it is not there yet '
+                                   '(otherwise a missing --db is an error)')
     parser_heppa.set_defaults(func=heppa_backfill)
 
     parser_hhorses = subparser.add_parser(
@@ -100,6 +126,9 @@ def veikkaus():
                                 help='Stop after N fetches (for a trial run)')
     parser_hhorses.add_argument('--retry-failed', action='store_true',
                                 help='Reset failed manifest rows to pending before crawling')
+    # No --create-db: this crawl is driven by the horses already in the archive
+    # (SELECT DISTINCT horseId FROM archive.heppa_start), so it has nothing to
+    # do against a database it just made.
     parser_hhorses.set_defaults(func=heppa_horses)
 
     parser_parse = subparser.add_parser(
@@ -112,6 +141,9 @@ def veikkaus():
     parser_parse.add_argument('--full', action='store_true',
                               help='Reload every archived payload, not just the ones fetched '
                                    'since the last parse. Needed after changing a parser')
+    parser_parse.add_argument('--create-db', action='store_true',
+                              help='Create the database if it is not there yet '
+                                   '(otherwise a missing --db is an error)')
     parser_parse.set_defaults(func=parse)
 
     parser_status = subparser.add_parser('status', help='Show crawl manifest progress')
@@ -138,6 +170,8 @@ def veikkaus():
     if not args.command:
         parser.print_help()
         sigterm_exit(None)
+
+    require_db(args)
 
     try:
         args.func(args)

@@ -319,11 +319,13 @@ def horse_record(runner: Runner) -> tuple:
 def start_record(runner: Runner, result: dict | None, win_odds: int | None) -> tuple:
     """One row of `archive.start`.
 
-    The last four columns are left NULL here and filled from `heppa_start`
-    after loading — see archive_db.RECOMPUTE_START_FROM_HEPPA. Writing them
-    NULL on every parse is deliberate: it means a re-crawl of the Veikkaus half
-    cannot leave a stale registry value behind, since the recompute re-derives
-    all four from scratch at the end of every run.
+    The last five columns are left NULL here and recomputed after loading —
+    four from `heppa_start` (archive_db.RECOMPUTE_START_FROM_HEPPA) and
+    `startInterval` from all three start-bearing tables at once
+    (archive_db.RECOMPUTE_START_STARTINTERVAL). Writing them NULL on every
+    parse is deliberate: it means a re-crawl of the Veikkaus half cannot leave
+    a stale derived value behind, since the recomputes re-derive every one of
+    them from scratch at the end of every run.
 
     Column order must stay in sync with archive_db.INSERT_START.
     """
@@ -358,7 +360,8 @@ def start_record(runner: Runner, result: dict | None, win_odds: int | None) -> t
             None,    # prizeWon         \
             None,    # disqualifiedCode  } from archive.heppa_start, after loading
             None,    # gallop           /
-            None)    # resultSource — which source ended up supplying placement
+            None,    # resultSource — which source ended up supplying placement
+            None)    # startInterval — see archive_db.KNOWN_START_GAPS
 
 
 def stat_records(runner: Runner) -> list[tuple]:
@@ -517,7 +520,9 @@ def heppa_start_record(start: HeppaStart) -> tuple:
 
     `horseKey` is NULL here: a Heppa start carries no birth year, so identity
     cannot be computed from it. archive_db.RECOMPUTE_HEPPA_START_HORSEKEY
-    fills it through the registry id instead.
+    fills it through the registry id instead. `startInterval` is NULL for the
+    same sort of reason — it is a fact about a career, not about a payload —
+    and archive_db.RECOMPUTE_HEPPA_START_STARTINTERVAL fills it.
 
     Column order must stay in sync with archive_db.INSERT_HEPPA_START.
     """
@@ -565,7 +570,8 @@ def heppa_start_record(start: HeppaStart) -> tuple:
             start.recordType,
             start.monte,
             start.status,
-            start.commentText)
+            start.commentText,
+            None)    # startInterval — see archive_db.KNOWN_START_GAPS
 
 
 def heppa_horse_record(horse: HeppaHorse) -> tuple:
@@ -1027,6 +1033,9 @@ def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> 
         # that reads it.
         db.recompute_heppa_links()
         db.recompute_start_from_heppa()
+        # Last, because it reads canonicalKey and heppa_start.horseKey, which
+        # recompute_heppa_links() above is what fills in.
+        db.recompute_cross_source_intervals()
         counts = {'cards': cards, 'races': races, 'starts': starts,
                   'prev-starts': prevstarts, 'heppa events': heppa_events,
                   'heppa races': heppa_races, 'heppa starts': heppa_starts,

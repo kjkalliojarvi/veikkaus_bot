@@ -118,11 +118,12 @@ CREATE_START_TABLE = """
         disqualifiedCode TEXT,   -- hpl, hll, hlo, hrp, k — Heppa only
         gallop BOOLEAN,          -- Heppa only
         resultSource TEXT,       -- which source supplied `placement`
+        startInterval BIGINT,    -- days since this horse's previous known start
         PRIMARY KEY (raceId, startNumber));
 """
 INSERT_START = ('INSERT OR REPLACE INTO archive.start '
                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
-                '?, ?, ?, ?);')
+                '?, ?, ?, ?, ?);')
 START_KEY = (0, 1)  # raceId, startNumber
 
 CREATE_ODDS_TABLE = """
@@ -348,11 +349,12 @@ CREATE_HEPPA_START_TABLE = """
         monte BOOLEAN,
         status TEXT,
         commentText TEXT,
+        startInterval BIGINT,    -- days since this horse's previous known start
         PRIMARY KEY (meetDate, trackCode, raceNumber, programNumber));
 """
 INSERT_HEPPA_START = ('INSERT OR REPLACE INTO archive.heppa_start VALUES '
                       '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
-                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
 HEPPA_START_KEY = (0, 1, 2, 3)  # meetDate, trackCode, raceNumber, programNumber
 
 # The registry's record of the animal rather than of a race — one row per
@@ -663,6 +665,158 @@ LABEL_VEIKKAUS_RESULTS = """
     WHERE placement IS NOT NULL AND resultSource IS NULL;
 """
 
+# --- cross-source start intervals -------------------------------------------
+#
+# Days since the horse's previous start, on the tables a model actually reads.
+# `archive.prev_start.startInterval` above answers a narrower question over one
+# table; this one is the layoff feature, and the two disagree on purpose (see
+# CLAUDE.md).
+#
+# Every start the archive knows about, from all three start-bearing tables.
+# `archive.prev_start` reaches back before the crawl window; `heppa_start`
+# reaches the local (PAIKALLISRAVI) and pony (PONI) meetings that have no
+# Veikkaus card at all. Neither is visible from `archive.start`, which is why
+# this is a union rather than a window over one table — and a missed
+# intervening start does not merely go unrecorded, it inflates the next gap.
+#
+# canonicalKey, not horseKey: Veikkaus writes an import's name inconsistently
+# and that splits 182 horses across 365 keys. Partitioning on horseKey would
+# give each fragment a career of its own and inflate every gap in it.
+#
+# The combination-pool meta-cards are excluded, and they have to be. They are
+# not meetings: a meta-card re-lists races that also appear under their real
+# track, so counting them puts the horse at two tracks on one day and hands the
+# next real start a zero-day gap. Measured before this filter: 2,514 horse-days
+# spread over more than one track, 2,489 of them a meta-card, and 2,475 of the
+# 2,806 zero-day gaps on archive.start were spurious. Dropping them costs
+# almost nothing — of 2,712 meta-card start rows, 8 are the only appearance
+# their horse has that day.
+#
+# The Swedish simulcasts (trackNumber 57/87, abbreviation ending '-V') are
+# deliberately *kept*. They are the other kind of card that has no Heppa
+# counterpart, but unlike a meta-card they are a real race the horse really
+# ran, duplicating nothing: they account for 0 of the multi-track days.
+# Dropping them would inflate the gaps around them.
+#
+# Meta-card start rows therefore end up with startInterval NULL, since the
+# join-back has no key to find. That is honest — they are pool bookkeeping, not
+# starts — but it is a third reason for a NULL on archive.start.
+META_CARD_TRACK_NUMBERS = (48, 88)   # MM, Sl, T75 / KUN, JAA, CIT
+
+# `ran` is the runner-ness vote, because a scratched horse did not start.
+# `archive.start.scratched` is entry-time data and is wrong for the 175 starts
+# where Heppa says `absent`; `heppa_start.absent` is right. `prev_start`
+# abstains — it only supplies a date, and it is verified to list withdrawn
+# entries: the 4 keys where it contradicts Heppa's `absent` all have `result`
+# NULL and `placingRaw` '0' on the same track. A career line with no result
+# code is not evidence of a start, so it is not offered as one.
+KNOWN_STARTS = f"""
+    SELECT h.canonicalKey                   AS canonicalKey,
+           ca.meetDate                      AS meetDate,
+           r.number                         AS raceNumber,
+           NOT coalesce(s.scratched, FALSE) AS ran
+    FROM archive.start s
+    JOIN archive.race r ON r.raceId = s.raceId
+    JOIN archive.card ca ON ca.cardId = r.cardId
+    JOIN archive.horse h ON h.horseKey = s.horseKey
+    WHERE coalesce(ca.trackNumber, 0) NOT IN {META_CARD_TRACK_NUMBERS}
+    UNION ALL
+    SELECT h.canonicalKey, hs.meetDate, hs.raceNumber,
+           NOT coalesce(hs.absent, FALSE)
+    FROM archive.heppa_start hs
+    JOIN archive.horse h ON h.horseKey = hs.horseKey
+    UNION ALL
+    SELECT h.canonicalKey, p.meetDate, p.raceNumber, CAST(NULL AS BOOLEAN)
+    FROM archive.prev_start p
+    JOIN archive.horse h ON h.horseKey = p.horseKey
+    WHERE p.result IS NOT NULL
+"""
+
+# One row per real appearance, with the days since the one before it.
+#
+# Deduped on (canonicalKey, meetDate, raceNumber) — the natural identity of a
+# start, and the same one archive.prev_start is keyed on, for the same reason:
+# heats and finals put a horse in two races on one card and that is a genuine
+# zero-day gap, while a start two sources both cover is still one start. Track
+# is not in the key, because a horse cannot be in two places on one day.
+#
+# `coalesce(bool_and(ran), TRUE)` is the vote: every source with an opinion has
+# to agree the horse ran, and a key nobody has an opinion on — a prev-start
+# outside the crawl window — counts. bool_and ignores NULLs, so abstention
+# needs no FILTER clause.
+#
+# A horse's earliest known start gets NULL, not the epoch sentinel that
+# archive.prev_start.startInterval carries. That sentinel exists because the old
+# pipeline had nowhere to put "unknowable"; a nullable column does.
+KNOWN_START_GAPS = f"""
+    SELECT canonicalKey, meetDate, raceNumber,
+           date_diff('day',
+                     lag(CAST(meetDate AS DATE)) OVER (PARTITION BY canonicalKey
+                                                       ORDER BY meetDate, raceNumber),
+                     CAST(meetDate AS DATE)) AS gap
+    FROM (SELECT canonicalKey, meetDate, raceNumber
+          FROM ({KNOWN_STARTS})
+          WHERE canonicalKey IS NOT NULL
+          GROUP BY 1, 2, 3
+          HAVING coalesce(bool_and(ran), TRUE))
+"""
+
+# Cleared first, for the reason RESET_HEPPA_CONTRIBUTION is: `UPDATE ... FROM`
+# only touches the rows its subquery joins to, so a start that stops qualifying
+# — a re-crawl finds Heppa calling it absent — would otherwise keep the gap it
+# had. Two whole-table updates buy an answer that is a function of the tables
+# rather than of how often this has run.
+RESET_START_INTERVALS = (
+    'UPDATE archive.start SET startInterval = NULL;',
+    'UPDATE archive.heppa_start SET startInterval = NULL;',
+)
+
+# archive.start has no meetDate, raceNumber or trackCode of its own, so the
+# join-back re-walks start -> race -> card exactly as RECOMPUTE_PREV_START_COACH
+# does, and re-derives the key rather than carrying raceId through the window.
+# That is deliberate: the dedup grain is coarser than (raceId, startNumber), and
+# the archive has a case where one (canonicalKey, meetDate, raceNumber) covers
+# two cards — 'all chance|2018' on 2024-03-24, race 8, at both Y and Kt.
+# Carrying an aggregated raceId would leave one of those two rows NULL forever,
+# and a key that exists only in prev_start has no raceId to carry at all.
+RECOMPUTE_START_STARTINTERVAL = f"""
+    UPDATE archive.start AS s
+    SET startInterval = g.gap
+    FROM (SELECT s2.raceId, s2.startNumber, k.gap
+          FROM archive.start s2
+          JOIN archive.race r ON r.raceId = s2.raceId
+          JOIN archive.card ca ON ca.cardId = r.cardId
+          JOIN archive.horse h ON h.horseKey = s2.horseKey
+          JOIN ({KNOWN_START_GAPS}) AS k
+            ON k.canonicalKey = h.canonicalKey
+           AND k.meetDate = ca.meetDate
+           AND k.raceNumber = r.number) AS g
+    WHERE g.raceId = s.raceId
+      AND g.startNumber = s.startNumber;
+"""
+
+# heppa_start carries meetDate and raceNumber itself, so only the identity has
+# to be resolved. `horseKey` is NULL wherever RECOMPUTE_HEPPA_START_HORSEKEY
+# never reached, and those rows cannot be placed in any career timeline: the
+# inner join drops them and startInterval stays NULL. So NULL means two things
+# on this table — no predecessor, or no identity — and the query that separates
+# them is `WHERE horseKey IS NOT NULL AND startInterval IS NULL`.
+RECOMPUTE_HEPPA_START_STARTINTERVAL = f"""
+    UPDATE archive.heppa_start AS hs
+    SET startInterval = g.gap
+    FROM (SELECT hs2.meetDate, hs2.trackCode, hs2.raceNumber, hs2.programNumber, k.gap
+          FROM archive.heppa_start hs2
+          JOIN archive.horse h ON h.horseKey = hs2.horseKey
+          JOIN ({KNOWN_START_GAPS}) AS k
+            ON k.canonicalKey = h.canonicalKey
+           AND k.meetDate = hs2.meetDate
+           AND k.raceNumber = hs2.raceNumber) AS g
+    WHERE g.meetDate = hs.meetDate
+      AND g.trackCode = hs.trackCode
+      AND g.raceNumber = hs.raceNumber
+      AND g.programNumber = hs.programNumber;
+"""
+
 CREATE_INDEXES = (
     'CREATE INDEX IF NOT EXISTS idx_start_horse ON archive.start(horseKey);',
     'CREATE INDEX IF NOT EXISTS idx_race_card ON archive.race(cardId);',
@@ -680,6 +834,8 @@ ADD_COLUMNS = (
     'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS heppaHorseId TEXT;',
     'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS baseKey TEXT;',
     'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS canonicalKey TEXT;',
+    'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS startInterval BIGINT;',
+    'ALTER TABLE archive.heppa_start ADD COLUMN IF NOT EXISTS startInterval BIGINT;',
 )
 
 
@@ -797,6 +953,26 @@ class ArchiveDb:
         self.conn.execute(RECOMPUTE_START_FROM_HEPPA)
         self.conn.execute(LABEL_VEIKKAUS_RESULTS)
 
+    def recompute_cross_source_intervals(self):
+        """Days since each horse's previous known start, over all three sources.
+
+        Distinct from recompute_start_intervals(), which is prev_start's own
+        same-table column: this unions archive.start, archive.heppa_start and
+        archive.prev_start, partitions on canonicalKey rather than horseKey, and
+        leaves a horse's earliest known start NULL rather than stamping the
+        epoch sentinel on it. The two can disagree for the same underlying
+        start, and each is right about its own question.
+
+        Must run after recompute_heppa_links(): canonicalKey and
+        heppa_start.horseKey are both written there, and this reads both. Run it
+        first instead and the column comes out almost entirely NULL, with no
+        error anywhere.
+        """
+        for statement in RESET_START_INTERVALS:
+            self.conn.execute(statement)
+        self.conn.execute(RECOMPUTE_START_STARTINTERVAL)
+        self.conn.execute(RECOMPUTE_HEPPA_START_STARTINTERVAL)
+
 
 def query_horse(db_name: str, name: str, before: str | None = None):
     """Past performances of a horse, oldest first — the §5 join.
@@ -806,7 +982,7 @@ def query_horse(db_name: str, name: str, before: str | None = None):
     """
     sql = """SELECT c.meetDate, c.trackAbbreviation, r.number, r.distance, r.startType,
                     s.startNumber, s.startTrack, s.driverName, s.placement, s.kmTime,
-                    s.kmTimeMs, s.winOddsFinal, s.careerWinnings
+                    s.kmTimeMs, s.winOddsFinal, s.careerWinnings, s.startInterval
              FROM archive.start s
              JOIN archive.race r ON r.raceId = s.raceId
              JOIN archive.card c ON c.cardId = r.cardId

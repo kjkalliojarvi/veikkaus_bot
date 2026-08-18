@@ -16,6 +16,7 @@ uv sync
 ## Usage
 
 ```bash
+uv run veikkaus backfill --from 2021-01-01 --create-db   # first run only
 uv run veikkaus backfill --from 2021-01-01  # crawl Veikkaus into data/raw/
 uv run veikkaus heppa --from 2021-01-01     # crawl Heppa meetings into data/raw/
 uv run veikkaus heppa-horses                # one registry record per horse
@@ -25,6 +26,8 @@ uv run veikkaus crosscheck                  # do the two sources agree?
 ```
 
 Fetching and parsing are deliberately separate. `backfill` only writes gzipped raw responses into `data/raw/` and records every fetch in a manifest table, so it is resumable — kill it and rerun the same command. It crawls newest date first, one request at a time with a ≥1 s delay and exponential backoff. `parse` then reads the raw archive into the `archive.*` tables and can be re-run at any time without re-crawling.
+
+Every command refuses a `--db` path that is not already there, because DuckDB creates a database for whatever path it is handed: a mistyped `--db` would otherwise mint an empty archive and then report zero of everything, which looks exactly like the real one having gone missing. `backfill`, `heppa` and `parse` take `--create-db` for the genuine first run; `status`, `crosscheck` and `heppa-horses` only ever read an archive, so they have no such flag.
 
 `--odds` additionally crawls win-pool odds for every race (roughly doubles the request count); without it, final win odds are only known for the paid places.
 
@@ -116,14 +119,14 @@ Everything lands in the `archive` schema of a DuckDB file:
 | `card` | race day at a track |
 | `race` | race |
 | `horse` | horse, keyed by normalised name + birth year |
-| `start` | (race, horse) — the race as entered and as it paid out |
-| `prev_start` | earlier start of a horse — the past-performance history, incl. `startInterval` (days since the horse's previous start) and `coachName` (back-filled from the archived race) |
+| `start` | (race, horse) — the race as entered and as it paid out, incl. `startInterval` (days since the horse's previous known start, across all three sources) |
+| `prev_start` | earlier start of a horse — the past-performance history, incl. its own `startInterval` and `coachName` (back-filled from the archived race) |
 | `stat` | (runner, period) — career/season form, current cards only |
 | `bet_percentage` | (runner, pool type) |
 | `odds_snapshot` | (pool, runner, capture time) |
 | `heppa_event` | race meeting in the Heppa registry, incl. track condition and temperature |
 | `heppa_race` | race in the Heppa registry |
-| `heppa_start` | (race, horse) as the registry recorded it — the whole field |
+| `heppa_start` | (race, horse) as the registry recorded it — the whole field, incl. `startInterval` |
 | `heppa_horse` | horse in the registry — UELN, exact birth date, origin, breeding |
 | `manifest` | planned fetch — the crawl ledger, for both sources |
 
