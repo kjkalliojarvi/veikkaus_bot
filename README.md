@@ -116,14 +116,14 @@ Everything lands in the `archive` schema of a DuckDB file:
 | `card` | race day at a track |
 | `race` | race |
 | `horse` | horse, keyed by normalised name + birth year |
-| `start` | (race, horse) — the race as entered and as it paid out |
-| `prev_start` | earlier start of a horse — the past-performance history, incl. `startInterval` (days since the horse's previous start) and `coachName` (back-filled from the archived race) |
+| `start` | (race, horse) — the race as entered and as it paid out, incl. `startInterval` (days since the horse's previous known start, across all three sources) |
+| `prev_start` | earlier start of a horse — the past-performance history, incl. its own `startInterval` and `coachName` (back-filled from the archived race) |
 | `stat` | (runner, period) — career/season form, current cards only |
 | `bet_percentage` | (runner, pool type) |
 | `odds_snapshot` | (pool, runner, capture time) |
 | `heppa_event` | race meeting in the Heppa registry, incl. track condition and temperature |
 | `heppa_race` | race in the Heppa registry |
-| `heppa_start` | (race, horse) as the registry recorded it — the whole field |
+| `heppa_start` | (race, horse) as the registry recorded it — the whole field, incl. `startInterval` |
 | `heppa_horse` | horse in the registry — UELN, exact birth date, origin, breeding |
 | `manifest` | planned fetch — the crawl ledger, for both sources |
 
