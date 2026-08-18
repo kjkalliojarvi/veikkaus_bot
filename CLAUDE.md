@@ -120,6 +120,8 @@ The ordering inside that coalesce is the whole design. **Names never repeat with
 
 **Pipeline:** `__main__.veikkaus()` (argparse) exposes four subcommands. `backfill --from D [--to D] [--odds] [--limit N] [--retry-failed]` → `crawler.backfill()` crawls Veikkaus into the raw zone; `heppa --from D [--to D] [--limit N] [--retry-failed]` → `heppa.backfill()` crawls the registry's meetings into the same raw zone and the same manifest; `heppa-horses [--limit N] [--retry-failed]` → `heppa.backfill_horses()` crawls one registry record per horse already in the archive; `parse` → `parse.parse_all()` loads the raw zone into `archive.*` and runs every recompute; `status` prints manifest counts for both; `crosscheck` → `crosscheck.crosscheck()` validates the two sources against each other.
 
+**Every subcommand refuses a `--db` that is not already there** (`require_db()`, run once before dispatch). DuckDB creates a database for whatever path it is handed, so a mistyped `--db` does not fail — it mints an empty archive and the command then reports zero of everything, which reads as the real archive having gone missing. That happened: `data/veikkaus_data`, the default path minus its suffix, sat in `data/` as a 12 KB empty database. `backfill`, `heppa` and `parse` take `--create-db` for the genuine first run. `status` and `crosscheck` only read, and `heppa-horses` is driven by the horses already in the archive, so none of the three has the flag — there is nothing they could do with a database they just made.
+
 **Not part of the pipeline:** `odds_json.py` and `odds_xml.py` are standalone scratch scripts, imported by nothing.
 
 ## Automation
