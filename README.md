@@ -24,6 +24,7 @@ uv run veikkaus status                      # how far both got
 uv run veikkaus parse                       # raw/ -> archive.* tables
 uv run veikkaus crosscheck                  # do the two sources agree?
 uv run veikkaus horse [name]                # browse one horse's Heppa starts (TUI)
+                                            #   click a stats row for the starts behind it
 ```
 
 Fetching and parsing are deliberately separate. `backfill` only writes gzipped raw responses into `data/raw/` and records every fetch in a manifest table, so it is resumable — kill it and rerun the same command. It crawls newest date first, one request at a time with a ≥1 s delay and exponential backoff. `parse` then reads the raw archive into the `archive.*` tables and can be re-run at any time without re-crawling.

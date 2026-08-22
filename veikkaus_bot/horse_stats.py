@@ -20,10 +20,16 @@ of them wrong:
   `<= 14` predicate silently files every horse's earliest start as a quick
   turnaround.
 
+Each breakdown is an `Axis`, and the label expression that names its buckets is
+written once: the aggregate selects it, and the drill-down behind a clicked
+bucket compares against it. See `Axis`.
+
 Run it directly to iterate on the SQL without starting Textual:
 
     uv run python -m veikkaus_bot.horse_stats 'com milton'
 """
+from typing import NamedTuple
+
 from .archive_db import DEFAULT_DB, db_read
 
 
@@ -93,57 +99,26 @@ SQL_SEARCH = """
     LIMIT ?
 """
 
-SQL_OVERALL = f'SELECT {PLACINGS} {_FROM}'
-
-# The combinations involving X are shown as they are, not folded into the
-# majority or into one 'unknown' row: the K/E/X codes are kept verbatim through
-# the whole pipeline, and X is 'not reported' rather than a third kind of
-# shoeing, so folding it either invents shoeings or hides starts. Eight
-# combinations exist archive-wide and no horse has more than five, so this
-# table is short whatever the horse.
-SQL_SHOES = f"""
-    SELECT hs.frontShoes || ' / ' || hs.rearShoes AS shoes, {PLACINGS}
-    {_FROM}
-    GROUP BY 1
-    ORDER BY starts DESC, shoes
-"""
-
-# specialCart is Heppa's americanSulkyKEX: K = yes, E = no, X = not reported.
-# The raw code stays in the cell and the legend in the UI glosses it, the same
-# treatment the shoe codes get — one place to learn the vocabulary rather than
-# two half-translated tables.
-SQL_CART = f"""
-    SELECT hs.specialCart AS cart, {PLACINGS}
-    {_FROM}
-    GROUP BY 1
-    ORDER BY starts DESC, cart
-"""
-
-# Distance class, with the auto-start prefix taken off: the eight codes Heppa
-# writes are four classes and an `a` for the start type — 'ke'/'ake', 'ly'/'aly',
-# 'kp'/'akp', 'pi'/'api' — and the start type is the next breakdown's axis, so
-# keeping the prefix here would split every class in two and ask the same
-# question twice. substr() rather than ltrim(code, 'a'), which would eat every
-# leading 'a' of a code that ever starts with two.
+# The distance class, with the auto-start prefix taken off: the eight codes
+# Heppa writes are four classes and an `a` for the start type — 'ke'/'ake',
+# 'ly'/'aly', 'kp'/'akp', 'pi'/'api' — and the start type is an axis of its own
+# below, so keeping the prefix here would split every class in two and ask the
+# same question twice. substr() rather than ltrim(code, 'a'), which would eat
+# every leading 'a' of a code that ever starts with two.
 #
-# Ordered short to long, so the label cannot be the sort key here either:
-# alphabetically these come out ke, kp, ly, pi. Observed spans, non-absent:
-# ly 600-1,980 m, ke 2,000-2,480 m, kp 2,500-2,860 m, pi 3,020-4,240 m. A code
-# outside the four sorts last rather than being dropped, and NULL is its own
-# row — every breakdown has to sum back to the overall start count.
+# NULL becomes its own 'unknown' row rather than disappearing: every breakdown
+# has to sum back to the overall start count, and a bucket that cannot be
+# clicked through to its starts is worse than an ugly label.
 _CLASS = """CASE WHEN hs.distanceCode LIKE 'a%' THEN substr(hs.distanceCode, 2)
                      ELSE hs.distanceCode END"""
 
+# Ordered short to long, because the label sorts wrong: alphabetically these
+# come out ke, kp, ly, pi. Observed spans, non-absent: ly 600-1,980 m,
+# ke 2,000-2,480 m, kp 2,500-2,860 m, pi 3,020-4,240 m. A code outside the four
+# sorts last rather than being dropped.
 _CLASS_ORDER = f"""CASE {_CLASS} WHEN 'ly' THEN 0 WHEN 'ke' THEN 1
                                      WHEN 'kp' THEN 2 WHEN 'pi' THEN 3
                                      ELSE 4 END"""
-
-SQL_DISTANCE = f"""
-    SELECT coalesce({_CLASS}, 'unknown') AS distance, {PLACINGS}
-    {_FROM}
-    GROUP BY 1, {_CLASS_ORDER}
-    ORDER BY {_CLASS_ORDER}, distance
-"""
 
 # Auto start against volt, off the parsed column rather than re-derived from the
 # code above — that column is what analysis joins on, so this counts the thing
@@ -155,19 +130,13 @@ SQL_DISTANCE = f"""
 #
 # NULL is 'unknown' and stays visible: `parse_heppa_auto_start` leaves it NULL
 # for a code it does not recognise rather than defaulting to volt.
-SQL_AUTOSTART = f"""
-    SELECT CASE hs.autoStart WHEN true THEN 'auto' WHEN false THEN 'volt'
-                             ELSE 'unknown' END AS "start type",
-           {PLACINGS}
-    {_FROM}
-    GROUP BY 1
-    ORDER BY starts DESC, "start type"
-"""
+_AUTO = """CASE hs.autoStart WHEN true THEN 'auto' WHEN false THEN 'volt'
+                                 ELSE 'unknown' END"""
 
-# The buckets sort by length, so the label cannot be the sort key: as text they
-# come out '15-30', '31-60', '<= 14', '> 60'. A second CASE gives the numeric
-# key, and DuckDB takes it in GROUP BY and ORDER BY without it reaching the
-# SELECT list, so the sort key never shows up in the table.
+# The layoff buckets sort by length, so the label cannot be the sort key: as
+# text they come out '15-30', '31-60', '<= 14', '> 60'. A second CASE gives the
+# numeric key, and DuckDB takes it in GROUP BY and ORDER BY without it reaching
+# the SELECT list, so the sort key never shows up in the table.
 #
 # NULL is its own bucket, and per horse it means exactly one thing: `absent` is
 # filtered above, and the 27,430 rows RECOMPUTE_HEPPA_START_HORSEKEY never
@@ -175,34 +144,95 @@ SQL_AUTOSTART = f"""
 # known predecessor across the three start-bearing tables — at most one row per
 # horse. Never `startInterval > 10000` here: that sentinel is prev_start's, and
 # heppa_start says unknown with NULL.
-_BUCKET = """CASE WHEN hs.startInterval IS NULL THEN 4
-                      WHEN hs.startInterval <= 14   THEN 0
-                      WHEN hs.startInterval <= 30   THEN 1
-                      WHEN hs.startInterval <= 60   THEN 2
-                                                    ELSE 3 END"""
+_LAYOFF = """CASE WHEN hs.startInterval IS NULL THEN 'unknown (no earlier start known)'
+                      WHEN hs.startInterval <= 14   THEN '<= 14 days'
+                      WHEN hs.startInterval <= 30   THEN '15-30 days'
+                      WHEN hs.startInterval <= 60   THEN '31-60 days'
+                                                    ELSE '> 60 days' END"""
 
-SQL_INTERVAL = f"""
-    SELECT CASE WHEN hs.startInterval IS NULL THEN 'unknown (no earlier start known)'
-                WHEN hs.startInterval <= 14   THEN '<= 14 days'
-                WHEN hs.startInterval <= 30   THEN '15-30 days'
-                WHEN hs.startInterval <= 60   THEN '31-60 days'
-                                              ELSE '> 60 days' END AS "days since previous",
-           {PLACINGS}
-    {_FROM}
-    GROUP BY 1, {_BUCKET}
-    ORDER BY {_BUCKET}
-"""
+_LAYOFF_ORDER = """CASE WHEN hs.startInterval IS NULL THEN 4
+                            WHEN hs.startInterval <= 14   THEN 0
+                            WHEN hs.startInterval <= 30   THEN 1
+                            WHEN hs.startInterval <= 60   THEN 2
+                                                          ELSE 3 END"""
 
-# (title, sql) pairs, crosscheck.REPORTS's shape: the UI builds one labelled
-# table per entry in a loop, so a fifth breakdown is one tuple entry and no
-# widget code.
+# The individual starts behind a bucket. Compact on purpose — the identity of
+# the start and its result, in the same vocabulary the breakdowns use.
+#
+# The placing column coalesces, because `placement` is NULL on 12.3 % of
+# non-absent starts and an empty cell would read as data we do not have. A
+# disqualification shows its code, and a start that finished outside the
+# placings shows '-'. Neither is a missing value.
+START_COLUMNS = """hs.meetDate AS date, hs.trackCode AS trk, hs.raceNumber AS race,
+           hs.distance AS dist,
+           coalesce(cast(hs.placement AS varchar), hs.disqualifiedCode, '-') AS plc,
+           hs.kmTime AS "km time", hs.driverName AS driver"""
+
+
+class Axis(NamedTuple):
+    """One way of grouping a horse's starts, and both queries about it.
+
+    `label` is the SQL expression that produces the bucket label, and it is
+    written **once**: `breakdown` selects it as the group column and `starts`
+    compares it against a clicked label. Two copies would be two definitions of
+    what '<= 14 days' means, free to drift apart — the trap `crosscheck.py`
+    avoids by building every report on `archive_db.HEPPA_START_BRIDGE` instead
+    of a hand-copied lookalike. Verified over the 400 busiest horses and all
+    6,110 of their buckets: the filter returns exactly the aggregate's count,
+    every time, and no label is ever NULL, so `= ?` needs no NULL-safe form.
+
+    Every label is non-NULL by construction, and that is a requirement rather
+    than a nicety: `NULL = ?` is never true, so a NULL label would be a blank
+    bucket row that opens an empty list. Hence the `coalesce` around the shoe
+    concatenation, where `||` propagates a NULL, and around `specialCart`. Both
+    are NULL on zero archive rows today, which is data and not construction.
+
+    `Overall` has no label. It groups nothing and filters nothing, so clicking
+    it lists every start the horse has.
+    """
+
+    title: str
+    column: str | None = None
+    label: str | None = None
+    order: str = 'starts DESC'
+    sort: str | None = None      # a numeric sort key, where the label sorts wrong
+
+    @property
+    def breakdown(self) -> str:
+        """Starts, placings and gallops per bucket."""
+        if self.label is None:
+            return f'SELECT {PLACINGS} {_FROM}'
+        group = f'GROUP BY 1, {self.sort}' if self.sort else 'GROUP BY 1'
+        return (f'SELECT {self.label} AS "{self.column}", {PLACINGS} '
+                f'{_FROM} {group} ORDER BY {self.order}')
+
+    @property
+    def starts(self) -> str:
+        """The individual starts behind one bucket, newest first."""
+        bucket = '' if self.label is None else f'AND {self.label} = ?'
+        return (f'SELECT {START_COLUMNS} {_FROM} {bucket} '
+                f'ORDER BY hs.meetDate DESC, hs.raceNumber DESC')
+
+
+# crosscheck.REPORTS's shape, one entry per axis: the UI builds a labelled table
+# per entry in a loop, so a seventh breakdown is one line here and no widget
+# code. The shoe combinations involving X are kept as they are rather than
+# folded into the majority or into one 'unknown' — the K/E/X codes stay verbatim
+# through the whole pipeline, and X is 'not reported' rather than a third kind
+# of shoeing, so folding it either invents shoeings or hides starts. specialCart
+# is Heppa's americanSulkyKEX (K = yes, E = no, X = not reported) and gets the
+# same treatment, glossed once in the UI legend.
 BREAKDOWNS = (
-    ('Overall', SQL_OVERALL),
-    ('Shoes (front / rear)', SQL_SHOES),
-    ('Cart', SQL_CART),
-    ('Distance class', SQL_DISTANCE),
-    ('Start type', SQL_AUTOSTART),
-    ('Days since previous start', SQL_INTERVAL),
+    Axis('Overall'),
+    Axis('Shoes (front / rear)', 'shoes',
+         "coalesce(hs.frontShoes || ' / ' || hs.rearShoes, 'unknown')",
+         'starts DESC, shoes'),
+    Axis('Cart', 'cart', "coalesce(hs.specialCart, 'unknown')", 'starts DESC, cart'),
+    Axis('Distance class', 'distance', f"coalesce({_CLASS}, 'unknown')",
+         f'{_CLASS_ORDER}, distance', _CLASS_ORDER),
+    Axis('Start type', 'start type', _AUTO, 'starts DESC, "start type"'),
+    Axis('Days since previous start', 'days since previous', _LAYOFF,
+         _LAYOFF_ORDER, _LAYOFF_ORDER),
 )
 
 SEARCH_LIMIT = 50
@@ -228,6 +258,16 @@ def search_horses(conn, term: str, limit: int = SEARCH_LIMIT):
     return fetch(conn, SQL_SEARCH, [term, term, limit])
 
 
+def bucket_starts(conn, axis: Axis, canonical_key: str, label: str | None = None):
+    """The individual starts behind one row of `axis.breakdown`.
+
+    `label` is that row's bucket, and it is ignored for `Overall`, which has no
+    label expression to compare it against.
+    """
+    params = [canonical_key] if axis.label is None else [canonical_key, label]
+    return fetch(conn, axis.starts, params)
+
+
 if __name__ == '__main__':
     import sys
 
@@ -237,9 +277,9 @@ if __name__ == '__main__':
         print(f'{len(hits)} hit(s) for {term!r}: ' + ', '.join(f'{r[0]} ({r[2]})' for r in hits[:5]))
         if hits:
             key = hits[0][-1]
-            for title, sql in BREAKDOWNS:
-                columns, rows = fetch(connection, sql, [key])
-                print(f'\n=== {key} — {title} ===')
+            for axis in BREAKDOWNS:
+                columns, rows = fetch(connection, axis.breakdown, [key])
+                print(f'\n=== {key} — {axis.title} ===')
                 print('  ' + '  '.join(str(c) for c in columns))
                 for row in rows:
                     print('  ' + '  '.join('' if v is None else str(v) for v in row))
