@@ -29,7 +29,8 @@ DERIVE = object()   # 'not given', so that auto_start=None can mean NULL
 def hstart(meet_date, horse_key, *, race_number=1, program_number=1, placement=None,
            absent=None, front='K', rear='K', cart='E', interval=None,
            distance_code='ke', auto_start=DERIVE, gallop=None,
-           placing_raw=None, dq=None):
+           placing_raw=None, dq=None, start_track=None, win_odd=None,
+           prize_won=None):
     """A heppa_start row with only the columns these tests care about set.
 
     `auto_start` defaults to what parse_heppa_auto_start() would make of
@@ -38,10 +39,11 @@ def hstart(meet_date, horse_key, *, race_number=1, program_number=1, placement=N
     row = [None] * HEPPA_START_COLUMNS
     row[0], row[1], row[2], row[3] = meet_date, 'TK', race_number, program_number
     row[4] = horse_key
-    row[11] = distance_code
+    row[9], row[11] = start_track, distance_code
     row[12], row[13], row[14] = placing_raw, placement, dq
     row[15], row[16] = gallop, absent
     row[19] = _auto(distance_code) if auto_start is DERIVE else auto_start
+    row[21], row[22] = prize_won, win_odd
     row[33], row[34], row[35] = front, rear, cart
     row[41] = interval
     return tuple(row)
@@ -414,8 +416,9 @@ def test_a_start_with_no_placement_reads_as_its_outcome_code(db):
         hstart('2026-01-22', 'boomer|2015', placing_raw='0'),
     ])
     names, rows = starts_of(db, axis('Overall'))
-    assert names == ['date', 'trk', 'race', 'dist', 'plc', 'km time', 'driver']
-    assert [row[4] for row in rows] == ['-', 'hlo', 'hpl', '4']
+    assert names == ['date', 'trk', 'race', 'dist', 'lane', 'plc', 'km time', 'odds',
+                     'prize', 'driver']
+    assert [row[5] for row in rows] == ['-', 'hlo', 'hpl', '4']
 
 
 def test_the_start_list_is_newest_first(db):
@@ -434,3 +437,21 @@ def test_every_axis_drills_down_to_the_same_columns(db):
     assert len({tuple(starts_of(db, one, (rows_of(db, one)[0][0] if one.label else None))[0])
                 for one in horse_stats.BREAKDOWNS}) == 1
 
+
+def test_the_start_list_carries_the_post_the_odds_and_the_prize(db):
+    """Three columns with three different NULL stories. `startTrack` is never
+    NULL; `prizeWon` is never NULL either and its 0 is what an unplaced start
+    won, not a gap; `winOdd` is NULL on the 44,995 local and pony starts with no
+    betting, and its 64 stored zeros are 'not reported' rather than a price of
+    nothing, since 1.00 is the floor of a win odd. The odds are text because
+    round() would print a 2.60 price as 2.6."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', placement=1, start_track=5,
+               win_odd=1002, prize_won=2200),
+        hstart('2026-01-08', 'boomer|2015', start_track=12, win_odd=None, prize_won=0),
+        hstart('2026-01-15', 'boomer|2015', start_track=1, win_odd=0, prize_won=0),
+    ])
+    names, rows = starts_of(db, axis('Overall'))
+    assert [(row[names.index('lane')], row[names.index('odds')], row[names.index('prize')])
+            for row in rows] == [(1, None, 0), (12, None, 0), (5, '10.02', 2200)]

@@ -157,16 +157,30 @@ _LAYOFF_ORDER = """CASE WHEN hs.startInterval IS NULL THEN 4
                                                           ELSE 3 END"""
 
 # The individual starts behind a bucket. Compact on purpose — the identity of
-# the start and its result, in the same vocabulary the breakdowns use.
+# the start, the conditions it ran under, how it went, and who drove.
 #
 # The placing column coalesces, because `placement` is NULL on 12.3 % of
 # non-absent starts and an empty cell would read as data we do not have. A
 # disqualification shows its code, and a start that finished outside the
 # placings shows '-'. Neither is a missing value.
+#
+# `lane` is `startTrack`, which archive_db names to match archive.start; it is
+# the post, 1-15, and never NULL. `odds` is `winOdd` scaled out of hundredths,
+# and NULL on the 44,995 non-absent rows of local and pony meetings where there
+# was no betting — blank there is the truth. nullif(0) because 1.00 is the floor
+# of a win odd, so the 64 rows storing 0 are 'not reported' rather than a price
+# of nothing. `prize` is `prizeWon`, this race's money for this horse, in euros
+# and never NULL: 0 is what an unplaced start won, which is a fact rather than a
+# gap, and 128,262 rows say it.
+#
+# printf rather than round(), which returns a double and so prints 2.6 for a
+# price of 2.60. printf keeps a NULL NULL, so the no-betting rows stay blank.
 START_COLUMNS = """hs.meetDate AS date, hs.trackCode AS trk, hs.raceNumber AS race,
-           hs.distance AS dist,
+           hs.distance AS dist, hs.startTrack AS lane,
            coalesce(cast(hs.placement AS varchar), hs.disqualifiedCode, '-') AS plc,
-           hs.kmTime AS "km time", hs.driverName AS driver"""
+           hs.kmTime AS "km time",
+           printf('%.2f', nullif(hs.winOdd, 0) / 100.0) AS odds,
+           hs.prizeWon AS prize, hs.driverName AS driver"""
 
 
 class Axis(NamedTuple):
