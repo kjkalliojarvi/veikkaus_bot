@@ -10,6 +10,7 @@ from .crosscheck import crosscheck
 from .fetcher import DEFAULT_DELAY
 from .heppa import backfill as heppa_backfill
 from .heppa import backfill_horses as heppa_horses
+from .horse_tui import horse_tui
 from .parse import parse
 
 DEFAULT_RAW = 'data/raw'
@@ -156,6 +157,16 @@ def veikkaus():
     parser_crosscheck.add_argument('--db', default=DEFAULT_DB,
                                    help=f'DuckDB database file (default: {DEFAULT_DB})')
     parser_crosscheck.set_defaults(func=crosscheck)
+
+    parser_horse = subparser.add_parser(
+        'horse', help="Browse a horse's registry starts in a terminal UI")
+    parser_horse.add_argument('name', nargs='?', default=None,
+                              help='Prefill the search box with this name')
+    parser_horse.add_argument('--db', default=DEFAULT_DB,
+                              help=f'DuckDB database file (default: {DEFAULT_DB})')
+    # No --create-db: this only ever reads, on a read-only connection, so there
+    # is nothing it could do with a database it just made.
+    parser_horse.set_defaults(func=horse_tui)
 
     #parser_card = subparser.add_parser('card', help='Ravit')
     #parser_card.add_argument('-n', '--name', help='Radan nimi')

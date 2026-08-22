@@ -852,6 +852,32 @@ def db_ops(db_name):
         conn.close()
 
 
+@contextmanager
+def db_read(db_name):
+    """A read-only connection, for the commands that only ever query.
+
+    Two things `db_ops` does that a reader must not. It `makedirs` the parent
+    and hands DuckDB a path, which mints a database for whatever it is given —
+    the failure `require_db()` exists to stop. And a read-write connection
+    holds the archive against a concurrent `parse` for as long as it is open.
+
+    Read-only still takes a lock — DuckDB refuses a read-write open while any
+    reader is attached — so this stays a per-query context manager rather than
+    a connection held for the length of a UI session. Opening the 317 MB
+    archive read-only measures ~6 ms, so the lock window is milliseconds and a
+    `parse` can run alongside a browsing session.
+
+    It also cannot run ADD_COLUMNS, so an archive predating a column surfaces
+    it as a duckdb.BinderException at the query rather than being migrated
+    underneath the reader. Callers report it; see `horse_tui`.
+    """
+    conn = duckdb.connect(db_name, read_only=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _insert_many(cur, statement, rows, key):
     """Insert rows, at most one per primary key.
 
