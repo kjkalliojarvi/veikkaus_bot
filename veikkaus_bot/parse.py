@@ -12,8 +12,8 @@ from . import archive_db
 from .archive_db import ArchiveDb, db_ops
 from .crawler import Manifest
 from .fetcher import read_raw
-from .models import (Card, HeppaEvent, HeppaHorse, HeppaRaceEntry, HeppaStart,
-                     Race, Runner, Stat)
+from .models import (Card, HeppaEvent, HeppaHorse, HeppaHorseStats, HeppaRaceEntry,
+                     HeppaStart, Race, Runner, Stat)
 
 
 FLUSH = 5000
@@ -518,6 +518,11 @@ def heppa_start_record(start: HeppaStart) -> tuple:
     The auto-start flag deliberately does *not* come from that time's suffix —
     `distanceCode` carries it for every horse, including those with no time.
 
+    `finnishTrack` is the payload's own flag and the only thing distinguishing a
+    start abroad, which `heppa.backfill_foreign` fetches from the same
+    endpoints. It is what `archive.heppa_start.horseId` joined the primary key
+    for: Heppa numbers every foreign start `programNumber` '0'.
+
     `horseKey` is NULL here: a Heppa start carries no birth year, so identity
     cannot be computed from it. archive_db.RECOMPUTE_HEPPA_START_HORSEKEY
     fills it through the registry id instead. `startInterval` is NULL for the
@@ -571,7 +576,8 @@ def heppa_start_record(start: HeppaStart) -> tuple:
             start.monte,
             start.status,
             start.commentText,
-            None)    # startInterval — see archive_db.KNOWN_START_GAPS
+            None,    # startInterval — see archive_db.KNOWN_START_GAPS
+            start.finnishTrack)
 
 
 def heppa_horse_record(horse: HeppaHorse) -> tuple:
@@ -620,6 +626,52 @@ def heppa_horse_record(horse: HeppaHorse) -> tuple:
             blank_to_none(dam.get('id')),
             blank_to_none(dam.get('name')),
             blank_to_none(dam.get('registerNo')))
+
+
+def heppa_horse_stat_records(stats: HeppaHorseStats) -> list[tuple]:
+    """Every row of one horse's registry statistics — seasons and totals, both
+    gaits.
+
+    Four buckets become one table: `stats`/`total` under the sulky and
+    `monteStats`/`monteTotal` in monte, told apart by the `monte` column rather
+    than by which list they came from, because that is what a query wants. The
+    totals keep the payload's own `year` of '0'.
+
+    A line with no year is dropped: `year` is a third of the primary key, and a
+    row that cannot say which season it counts is not a fact about anything.
+
+    Column order must stay in sync with archive_db.INSERT_HEPPA_HORSE_STAT.
+    """
+    rows = []
+    for monte, lines in ((False, [stats.total, *stats.stats]),
+                         (True, [stats.monteTotal, *stats.monteStats])):
+        for line in lines:
+            if line is None or line.year is None:
+                continue
+            rows.append((stats.id,
+                         line.year,
+                         monte,
+                         parse_heppa_int(line.starts),
+                         parse_heppa_int(line.firstPlaces),
+                         parse_heppa_int(line.secondPlaces),
+                         parse_heppa_int(line.thirdPlaces),
+                         parse_heppa_int(line.gallops),
+                         parse_heppa_int(line.disqualifications),
+                         parse_heppa_int(line.priceMoney),
+                         parse_heppa_int(line.priceMoneyPerStart),
+                         parse_heppa_int(line.winningPercent),
+                         parse_heppa_int(line.placementPercent),
+                         parse_heppa_int(line.gallopPercentage),
+                         parse_heppa_int(line.disqualificationPercentage),
+                         blank_to_none(line.record),
+                         blank_to_none(line.recordType),
+                         line.recordMonte,
+                         blank_to_none(line.carRecord),
+                         blank_to_none(line.carRecordType),
+                         line.carRecordMonte,
+                         blank_to_none(line.bestRecordOfYear),
+                         blank_to_none(line.bestRecordOfAllTime)))
+    return rows
 
 
 def _flush(store, rows, force=False):
@@ -961,17 +1013,34 @@ def _parse_heppa_races(manifest: Manifest, raw_root: str, db: ArchiveDb,
 
 def _parse_heppa_starts(manifest: Manifest, raw_root: str, db: ArchiveDb,
                         unparsed_only: bool = True) -> int:
+    """Both kinds of Heppa field: the Finnish meetings and the ones abroad.
+
+    One loop over two endpoint types, because they are the same payload from the
+    same endpoint and land in the same table — only their discovery differed.
+
+    A start with no `horseId` is dropped rather than stored. `horseId` joined the
+    primary key when the starts abroad arrived, DuckDB will not have a NULL
+    there, and one such row would fail the whole batch it rides in rather than
+    itself. It happens on none of the archive's 314,981 rows; this is for the
+    day the payload changes.
+    """
     rows, consumed = [], []
     count = 0
-    for task, payload in _each_payload(manifest, raw_root, 'heppa_start', consumed,
-                                       unparsed_only):
-        for raw in _heppa_entries(task, payload):
-            try:
-                rows.append(heppa_start_record(HeppaStart(**raw)))
-                count += 1
-            except Exception as e:
-                print(f'{task.rawPath}: start {raw.get("programNumber")}: {e}')
-        _flush(db.store_heppa_starts, rows)
+    for endpoint_type in ('heppa_start', 'heppa_foreign_start'):
+        for task, payload in _each_payload(manifest, raw_root, endpoint_type, consumed,
+                                           unparsed_only):
+            for raw in _heppa_entries(task, payload):
+                try:
+                    start = HeppaStart(**raw)
+                    if start.horseId is None:
+                        print(f'{task.rawPath}: start {raw.get("programNumber")}: '
+                              'no horseId, dropped')
+                        continue
+                    rows.append(heppa_start_record(start))
+                    count += 1
+                except Exception as e:
+                    print(f'{task.rawPath}: start {raw.get("programNumber")}: {e}')
+            _flush(db.store_heppa_starts, rows)
     _flush(db.store_heppa_starts, rows, force=True)
     manifest.mark_parsed(consumed)
     return count
@@ -991,6 +1060,24 @@ def _parse_heppa_horses(manifest: Manifest, raw_root: str, db: ArchiveDb,
             print(f'{task.rawPath}: horse {task.entityId}: {e}')
         _flush(db.store_heppa_horses, rows)
     _flush(db.store_heppa_horses, rows, force=True)
+    manifest.mark_parsed(consumed)
+    return count
+
+
+def _parse_heppa_horse_stats(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                             unparsed_only: bool = True) -> int:
+    rows, consumed = [], []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'heppa_horse_stat', consumed,
+                                       unparsed_only):
+        try:
+            new = heppa_horse_stat_records(HeppaHorseStats(**payload))
+            rows.extend(new)
+            count += len(new)
+        except Exception as e:
+            print(f'{task.rawPath}: {e}')
+        _flush(db.store_heppa_horse_stats, rows)
+    _flush(db.store_heppa_horse_stats, rows, force=True)
     manifest.mark_parsed(consumed)
     return count
 
@@ -1026,6 +1113,7 @@ def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> 
         heppa_races = _parse_heppa_races(manifest, raw_root, db, unparsed)
         heppa_starts = _parse_heppa_starts(manifest, raw_root, db, unparsed)
         heppa_horses = _parse_heppa_horses(manifest, raw_root, db, unparsed)
+        heppa_stats = _parse_heppa_horse_stats(manifest, raw_root, db, unparsed)
         db.recompute_start_intervals()
         db.recompute_prev_start_coaches()
         db.recompute_auto_starts()
@@ -1039,7 +1127,7 @@ def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> 
         counts = {'cards': cards, 'races': races, 'starts': starts,
                   'prev-starts': prevstarts, 'heppa events': heppa_events,
                   'heppa races': heppa_races, 'heppa starts': heppa_starts,
-                  'heppa horses': heppa_horses}
+                  'heppa horses': heppa_horses, 'heppa horse stats': heppa_stats}
     return counts
 
 

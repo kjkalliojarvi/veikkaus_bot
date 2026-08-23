@@ -20,6 +20,9 @@ uv run veikkaus backfill --from 2021-01-01 --create-db   # first run only
 uv run veikkaus backfill --from 2021-01-01  # crawl Veikkaus into data/raw/
 uv run veikkaus heppa --from 2021-01-01     # crawl Heppa meetings into data/raw/
 uv run veikkaus heppa-horses                # one registry record per horse
+uv run veikkaus heppa-foreign               # meetings abroad: starts Finnish horses made there
+                                            #   list extra ones in foreign_meetings.csv
+uv run veikkaus heppa-stats                 # the registry's career totals, to measure what is missing
 uv run veikkaus status                      # how far both got
 uv run veikkaus parse                       # raw/ -> archive.* tables
 uv run veikkaus crosscheck                  # do the two sources agree?

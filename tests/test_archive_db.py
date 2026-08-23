@@ -56,7 +56,10 @@ def heppa_start(meet_date, track_code, race_number, program_number, horse_id=Non
     """A heppa_start row with only the columns this test cares about set."""
     row = [None] * HEPPA_START_COLUMNS
     row[0], row[1], row[2], row[3] = meet_date, track_code, race_number, program_number
-    row[5] = horse_id
+    # horseId joined the primary key when the starts abroad arrived, so it can no
+    # longer be NULL. Unset, it is a per-row synthetic that matches no
+    # archive.horse — the recomputes see it exactly as they saw a NULL.
+    row[5] = horse_id or f'x{meet_date}{track_code}{race_number}{program_number}'
     row[13], row[14], row[15], row[16] = placement, disqualified_code, gallop, absent
     row[17], row[21], row[22] = km_time, prize_won, win_odd
     return tuple(row)
@@ -782,3 +785,122 @@ def test_a_swedish_simulcast_is_a_real_start(db):
     recompute(db)
     assert start_intervals(db)[(15, 1)] == 7
     assert start_intervals(db)[(20, 1)] == 7
+
+
+# --- the starts abroad -----------------------------------------------------
+#
+# Heppa numbers every start at a meeting abroad `programNumber` 0, so the key
+# that identifies a Finnish start no longer identifies these. The failure is
+# silent — INSERT OR REPLACE keeps the last row for a key and `_insert_many`
+# collapses a batch the same way — which is why it is pinned here.
+
+
+def foreign_start(horse_id, meet_date='2026-08-16', track_code='BO', race_number=4,
+                  placement=None):
+    """A start abroad: programNumber 0, as Heppa sends it, and finnishTrack FALSE."""
+    row = [None] * HEPPA_START_COLUMNS
+    row[0], row[1], row[2], row[3] = meet_date, track_code, race_number, 0
+    row[5], row[13], row[42] = horse_id, placement, False
+    return tuple(row)
+
+
+def test_several_horses_in_one_race_abroad_all_survive_one_batch(db):
+    """Bollnas 2026-08-16 race 8 really does return five Finnish horses, every
+    one of them programNumber 0. Without horseId in the key, four of the five are
+    dropped with no error anywhere."""
+    db.store_heppa_starts([foreign_start(f'H{n}', placement=n) for n in range(1, 6)])
+    assert db.conn.execute("""
+        SELECT count(*), count(DISTINCT horseId) FROM archive.heppa_start
+        WHERE finnishTrack = FALSE""").fetchone() == (5, 5)
+
+
+def test_several_horses_in_one_race_abroad_all_survive_separate_batches(db):
+    """The same across batches, where INSERT OR REPLACE rather than the in-Python
+    dedupe is what would have lost them."""
+    for n in range(1, 6):
+        db.store_heppa_starts([foreign_start(f'H{n}', placement=n)])
+    assert db.conn.execute(
+        'SELECT count(*) FROM archive.heppa_start').fetchone()[0] == 5
+
+
+def test_one_horse_re_reported_in_one_race_abroad_is_still_one_row(db):
+    """The other half of the key: same horse, same race, twice. The placement of
+    the later row wins, as everywhere else in the archive."""
+    db.store_heppa_starts([foreign_start('H1', placement=7),
+                           foreign_start('H1', placement=4)])
+    assert db.conn.execute(
+        'SELECT count(*), max(placement) FROM archive.heppa_start').fetchone() == (1, 4)
+
+
+def test_a_home_start_and_a_start_abroad_can_share_a_date_and_a_race_number(db):
+    """Different tracks, so nothing clever is needed — but the row that says
+    which is which is `finnishTrack`, and it has to survive the round trip."""
+    db.store_heppa_starts([heppa_start('2026-08-16', 'Y', 4, 6, horse_id='H1'),
+                           foreign_start('H1')])
+    assert db.conn.execute("""
+        SELECT coalesce(finnishTrack, true) AS home, count(*)
+        FROM archive.heppa_start GROUP BY 1 ORDER BY 1""").fetchall() == [
+            (False, 1), (True, 1)]
+
+
+def test_the_primary_key_gains_horseid_on_an_older_archive(db):
+    """archive_db.create() rebuilds the table when its key predates the starts
+    abroad, and the rebuild has to keep every row and stamp finnishTrack TRUE —
+    every pre-existing row descends from the Finnish-only results listing.
+    """
+    db.conn.execute('DROP TABLE archive.heppa_start')
+    db.conn.execute(archive_db.CREATE_HEPPA_START_TABLE.replace(
+        ', horseId));', '));').replace('finnishTrack BOOLEAN,', ''))
+    db.conn.execute("INSERT INTO archive.heppa_start VALUES "
+                    "('2026-08-08', 'Y', 4, 6, NULL, 'H1'" + ', NULL' * 36 + ')')
+    archive_db.create(db.conn)
+    assert db.conn.execute(archive_db.HEPPA_START_PK).fetchone()[0] == [
+        'meetDate', 'trackCode', 'raceNumber', 'programNumber', 'horseId']
+    assert db.conn.execute(
+        'SELECT count(*), min(finnishTrack) FROM archive.heppa_start').fetchone() == (1, True)
+    assert archive_db.migrate_heppa_start_pk(db.conn) is False
+
+
+def test_two_horses_in_one_race_abroad_keep_their_own_layoffs(db):
+    """The join-back in RECOMPUTE_HEPPA_START_STARTINTERVAL has to use the whole
+    primary key. Every foreign start in a race is programNumber 0, so the old
+    four-column match covered the entire race, and `UPDATE ... FROM` with a
+    non-unique match takes an arbitrary row of the group — the two horses below
+    were handed each other's layoff. Observed on the real archive before the fix:
+    Combat Fighter's Solvalla start read 20 days where the union said 14.
+    """
+    db.store_horses([horse('early|2019', name='Early'), horse('late|2019', name='Late')])
+    db.store_heppa_starts([
+        # one horse raced a week before the meeting abroad, the other a month
+        heppa_start('2026-08-09', 'Y', 1, 5, horse_id='EARLY'),
+        heppa_start('2026-07-16', 'Y', 1, 6, horse_id='LATE'),
+        foreign_start('EARLY', meet_date='2026-08-16'),
+        foreign_start('LATE', meet_date='2026-08-16'),
+    ])
+    db.conn.execute("UPDATE archive.horse SET heppaHorseId = 'EARLY' "
+                    "WHERE horseKey = 'early|2019'")
+    db.conn.execute("UPDATE archive.horse SET heppaHorseId = 'LATE' "
+                    "WHERE horseKey = 'late|2019'")
+    recompute(db)
+    assert db.conn.execute("""
+        SELECT horseId, startInterval FROM archive.heppa_start
+        WHERE finnishTrack = FALSE ORDER BY horseId""").fetchall() == [
+            ('EARLY', 7), ('LATE', 31)]
+
+
+def test_the_rebuild_drops_a_row_that_never_had_a_registry_id(db):
+    """horseId is in the new key, so DuckDB will not hold a NULL there and the
+    rebuild would fail on the whole table rather than on the row. None of the
+    314,981 rows this was written against had one, and a re-parse would drop it
+    too, so nothing recoverable is lost — but it has to be the row that goes,
+    not the migration."""
+    db.conn.execute('DROP TABLE archive.heppa_start')
+    db.conn.execute(archive_db.CREATE_HEPPA_START_TABLE.replace(
+        ', horseId));', '));').replace('finnishTrack BOOLEAN,', ''))
+    for prognum, horse_id in ((6, "'H1'"), (7, 'NULL')):
+        db.conn.execute("INSERT INTO archive.heppa_start VALUES "
+                        f"('2026-08-08', 'Y', 4, {prognum}, NULL, {horse_id}"
+                        + ', NULL' * 36 + ')')
+    archive_db.create(db.conn)
+    assert db.conn.execute(
+        'SELECT count(*), min(horseId) FROM archive.heppa_start').fetchone() == (1, 'H1')

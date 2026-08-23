@@ -409,3 +409,54 @@ class HeppaStart(BaseModel):
     trainerCommentsUpdated: Optional[bool] = None
     trackNumber: Optional[str] = None
     finnishTrack: Optional[bool] = None
+
+class HeppaHorseStatLine(BaseModel):
+    """One row of `/horse/{horseId}/stats` — a season, or a career total.
+
+    `year` is '0' on the totals the payload calls `total`/`monteTotal`, and a
+    four-digit season otherwise. Every scalar is a string, as everywhere in this
+    API.
+
+    **This is an as-of-now snapshot and can never be an as-of-race-day feature.**
+    It is what the registry holds *today*, so joining it to a past race leaks
+    that race's result and every result after it — the rule
+    `heppa_start.horsePriceSum` and `record` already carry. It is crawled for
+    coverage accounting: its `starts` is the only figure that says how much of a
+    horse's career the archive is missing, because Heppa counts the starts abroad
+    it will not enumerate.
+    """
+    year: Optional[str] = None
+    starts: Optional[str] = None
+    firstPlaces: Optional[str] = None
+    secondPlaces: Optional[str] = None
+    thirdPlaces: Optional[str] = None
+    gallops: Optional[str] = None
+    disqualifications: Optional[str] = None
+    priceMoney: Optional[str] = None            # euros, as heppa_start.price is
+    priceMoneyPerStart: Optional[str] = None
+    winningPercent: Optional[str] = None
+    placementPercent: Optional[str] = None
+    gallopPercentage: Optional[str] = None
+    disqualificationPercentage: Optional[str] = None
+    record: Optional[str] = None
+    recordType: Optional[str] = None
+    recordMonte: Optional[bool] = None
+    carRecord: Optional[str] = None
+    carRecordType: Optional[str] = None
+    carRecordMonte: Optional[bool] = None
+    bestRecordOfYear: Optional[str] = None
+    bestRecordOfAllTime: Optional[str] = None
+
+
+class HeppaHorseStats(BaseModel):
+    """The whole `/horse/{horseId}/stats` payload.
+
+    Four buckets: `stats` and `total` for racing under the sulky, `monteStats`
+    and `monteTotal` for monte. They are separate careers as far as records go,
+    which is why `archive.heppa_horse_stat` keys on `monte` as well as the year.
+    """
+    id: Optional[str] = None
+    total: Optional[HeppaHorseStatLine] = None
+    stats: list[HeppaHorseStatLine] = []
+    monteTotal: Optional[HeppaHorseStatLine] = None
+    monteStats: list[HeppaHorseStatLine] = []

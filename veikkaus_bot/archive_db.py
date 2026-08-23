@@ -306,6 +306,21 @@ HEPPA_RACE_KEY = (0, 1, 2)  # meetDate, trackCode, raceNumber
 #
 # `horseKey` is NULL at insert and recomputed: a Heppa start carries a birth
 # year nowhere, so identity has to come from the archive via `horseId`.
+#
+# **`horseId` is in the primary key because of the starts abroad.** Heppa serves
+# a Finnish horse's foreign meetings through the same per-meeting endpoints
+# (`heppa.backfill_foreign`), but it gives every one of those starts
+# `programNumber` '0' — Bollnas 2026-08-16 race 4 returns two Finnish horses,
+# both '0'. Without `horseId` the four-column key collides, and the collision is
+# silent: `_insert_many` dedupes within a batch on HEPPA_START_KEY and
+# INSERT OR REPLACE dedupes across them, so one of the two starts simply is not
+# there. `horseId` is non-NULL on every row the archive has ever held, and
+# `programNumber = 0` occurs on no Finnish row, so both halves are safe.
+#
+# `finnishTrack` comes straight off the payload and is the only thing marking a
+# row as a start abroad. It matters downstream: crosscheck's unmatched-meeting
+# reports have to exclude these, because a foreign meeting has no Veikkaus card
+# by design and 356 of them would drown the signal the report exists for.
 CREATE_HEPPA_START_TABLE = """
     CREATE TABLE IF NOT EXISTS archive.heppa_start(
         meetDate TEXT,
@@ -350,12 +365,15 @@ CREATE_HEPPA_START_TABLE = """
         status TEXT,
         commentText TEXT,
         startInterval BIGINT,    -- days since this horse's previous known start
-        PRIMARY KEY (meetDate, trackCode, raceNumber, programNumber));
+        finnishTrack BOOLEAN,    -- FALSE on a start abroad; see the PK note above
+        PRIMARY KEY (meetDate, trackCode, raceNumber, programNumber, horseId));
 """
 INSERT_HEPPA_START = ('INSERT OR REPLACE INTO archive.heppa_start VALUES '
                       '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
-                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
-HEPPA_START_KEY = (0, 1, 2, 3)  # meetDate, trackCode, raceNumber, programNumber
+                      '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+# meetDate, trackCode, raceNumber, programNumber, horseId — horseId is index 5,
+# not 4, and this tuple must stay in step with the PRIMARY KEY above.
+HEPPA_START_KEY = (0, 1, 2, 3, 5)  # meetDate, trackCode, raceNumber, programNumber
 
 # The registry's record of the animal rather than of a race — one row per
 # horse, from `/horse/{horseId}`. Nothing in it is time-varying, so unlike the
@@ -801,10 +819,20 @@ RECOMPUTE_START_STARTINTERVAL = f"""
 # inner join drops them and startInterval stays NULL. So NULL means two things
 # on this table — no predecessor, or no identity — and the query that separates
 # them is `WHERE horseKey IS NOT NULL AND startInterval IS NULL`.
+#
+# **`horseId` is in the join-back because of the starts abroad, and leaving it
+# out was a real bug rather than a tidiness point.** Every foreign start in one
+# race carries `programNumber` 0, so (meetDate, trackCode, raceNumber,
+# programNumber) matches the whole race there, and `UPDATE ... FROM` with a
+# non-unique match takes an arbitrary row of the group: horses were handed each
+# other's layoffs. Observed before the fix — Combat Fighter's Solvalla start read
+# 20 days where the union said 14. The join-back must use the primary key, all
+# five columns of it.
 RECOMPUTE_HEPPA_START_STARTINTERVAL = f"""
     UPDATE archive.heppa_start AS hs
     SET startInterval = g.gap
-    FROM (SELECT hs2.meetDate, hs2.trackCode, hs2.raceNumber, hs2.programNumber, k.gap
+    FROM (SELECT hs2.meetDate, hs2.trackCode, hs2.raceNumber, hs2.programNumber,
+                 hs2.horseId, k.gap
           FROM archive.heppa_start hs2
           JOIN archive.horse h ON h.horseKey = hs2.horseKey
           JOIN ({KNOWN_START_GAPS}) AS k
@@ -814,8 +842,57 @@ RECOMPUTE_HEPPA_START_STARTINTERVAL = f"""
     WHERE g.meetDate = hs.meetDate
       AND g.trackCode = hs.trackCode
       AND g.raceNumber = hs.raceNumber
-      AND g.programNumber = hs.programNumber;
+      AND g.programNumber = hs.programNumber
+      AND g.horseId = hs.horseId;
 """
+
+# The registry's own count of a horse's career, from `/horse/{horseId}/stats`.
+# One row per (horse, season, monte), plus a `year = '0'` row for the career
+# total the payload calls `total`.
+#
+# **As-of-now, and reference-only.** This is what the registry holds today, so
+# joining it to a past race leaks that race's result and every result after it —
+# the rule `heppa_start.horsePriceSum` and `record` already carry, and the reason
+# this endpoint went uncrawled for so long. It is here for one job: `starts` is
+# the only figure that says how much of a horse's career the archive is missing,
+# because Heppa counts the starts abroad that it will not enumerate. Combat
+# Fighter reads 81 career starts against the 27 the archive holds, 16 of them in
+# 2026 against 10 — and the rest predate its Finnish registration, so nothing
+# will ever reach them.
+#
+# `monte` is in the key rather than a filter: monte and sulky racing keep
+# separate records, and the payload ships them as separate buckets.
+CREATE_HEPPA_HORSE_STAT_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.heppa_horse_stat(
+        horseId TEXT,
+        year TEXT,               -- '0' is the career total
+        monte BOOLEAN,
+        starts BIGINT,
+        firstPlaces BIGINT,
+        secondPlaces BIGINT,
+        thirdPlaces BIGINT,
+        gallops BIGINT,
+        disqualifications BIGINT,
+        priceMoney BIGINT,       -- euros, as heppa_start.prizeWon is
+        priceMoneyPerStart BIGINT,
+        winningPercent BIGINT,
+        placementPercent BIGINT,
+        gallopPercentage BIGINT,
+        disqualificationPercentage BIGINT,
+        record TEXT,
+        recordType TEXT,
+        recordMonte BOOLEAN,
+        carRecord TEXT,
+        carRecordType TEXT,
+        carRecordMonte BOOLEAN,
+        bestRecordOfYear TEXT,
+        bestRecordOfAllTime TEXT,
+        PRIMARY KEY (horseId, year, monte));
+"""
+INSERT_HEPPA_HORSE_STAT = ('INSERT OR REPLACE INTO archive.heppa_horse_stat VALUES '
+                           '(' + ', '.join('?' * 23) + ');')
+HEPPA_HORSE_STAT_KEY = (0, 1, 2)  # horseId, year, monte
+
 
 CREATE_INDEXES = (
     'CREATE INDEX IF NOT EXISTS idx_start_horse ON archive.start(horseKey);',
@@ -836,7 +913,61 @@ ADD_COLUMNS = (
     'ALTER TABLE archive.horse ADD COLUMN IF NOT EXISTS canonicalKey TEXT;',
     'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS startInterval BIGINT;',
     'ALTER TABLE archive.heppa_start ADD COLUMN IF NOT EXISTS startInterval BIGINT;',
+    'ALTER TABLE archive.heppa_start ADD COLUMN IF NOT EXISTS finnishTrack BOOLEAN;',
 )
+
+
+# ADD_COLUMNS cannot change a primary key, and archive.heppa_start's gained a
+# column when the crawl learned to fetch the meetings abroad. An archive built
+# before that keeps the four-column key, under which two foreign starts in one
+# race collide, so it is rebuilt once rather than left to lose rows quietly.
+#
+# The rows survive: every column already exists, only the constraint changes.
+# And `finnishTrack` is stamped TRUE on what was already there, which is a fact
+# rather than a default — every pre-existing row descends from a `heppa_results`
+# event, and that listing is Finnish-only (0 of the 301 events of 2026 said
+# otherwise). So no re-parse is needed, though one is harmless.
+#
+# A row with no `horseId` cannot come along, because the new key will not have a
+# NULL in it, so the rebuild drops those and says how many. None of the 314,981
+# rows this was written against had one; a re-parse would drop them too, for the
+# same reason, so this loses nothing that could be restored.
+HEPPA_START_PK = """
+    SELECT constraint_column_names FROM duckdb_constraints()
+    WHERE table_name = 'heppa_start' AND constraint_type = 'PRIMARY KEY'
+"""
+
+MIGRATE_HEPPA_START_PK = (
+    # The index on horseId has to go first: DuckDB refuses to rename a table
+    # anything depends on. create() runs CREATE_INDEXES after this, which puts
+    # it straight back.
+    'DROP INDEX IF EXISTS archive.idx_heppa_start_horse;',
+    'ALTER TABLE archive.heppa_start RENAME TO heppa_start_old;',
+    CREATE_HEPPA_START_TABLE,
+    'INSERT INTO archive.heppa_start SELECT * FROM archive.heppa_start_old '
+    'WHERE horseId IS NOT NULL;',
+    'DROP TABLE archive.heppa_start_old;',
+    'UPDATE archive.heppa_start SET finnishTrack = TRUE WHERE finnishTrack IS NULL;',
+)
+
+
+def migrate_heppa_start_pk(conn) -> bool:
+    """Rebuild archive.heppa_start if its key predates the starts abroad.
+
+    Returns whether it did anything, so a caller can say so. A fresh archive is
+    created with the right key and skips this entirely.
+    """
+    key = conn.execute(HEPPA_START_PK).fetchone()
+    if not key or 'horseId' in key[0]:
+        return False
+    dropped = conn.execute('SELECT count(*) FROM archive.heppa_start '
+                           'WHERE horseId IS NULL').fetchone()[0]
+    for statement in MIGRATE_HEPPA_START_PK:
+        conn.execute(statement)
+    if dropped:
+        print(f'archive.heppa_start: rebuilt on the new primary key; {dropped} '
+              'row(s) with no horseId dropped, which the new key cannot hold.')
+    return True
 
 
 @contextmanager
@@ -903,7 +1034,13 @@ def create(conn):
                       CREATE_BETPERCENTAGE_TABLE, CREATE_PREVSTART_TABLE,
                       CREATE_HEPPA_EVENT_TABLE, CREATE_HEPPA_RACE_TABLE,
                       CREATE_HEPPA_START_TABLE, CREATE_HEPPA_HORSE_TABLE,
-                      *ADD_COLUMNS, *CREATE_INDEXES):
+                      CREATE_HEPPA_HORSE_STAT_TABLE, *ADD_COLUMNS):
+        conn.execute(statement)
+    # Between the columns and the indexes, and both halves of that matter: the
+    # rebuild copies every column, so it needs ADD_COLUMNS to have run, and it
+    # renames the table, which DuckDB refuses while an index depends on it.
+    migrate_heppa_start_pk(conn)
+    for statement in CREATE_INDEXES:
         conn.execute(statement)
 
 
@@ -948,6 +1085,9 @@ class ArchiveDb:
 
     def store_heppa_horses(self, rows):
         _insert_many(self.conn, INSERT_HEPPA_HORSE, rows, HEPPA_HORSE_KEY)
+
+    def store_heppa_horse_stats(self, rows):
+        _insert_many(self.conn, INSERT_HEPPA_HORSE_STAT, rows, HEPPA_HORSE_STAT_KEY)
 
     def recompute_start_intervals(self):
         self.conn.execute(RECOMPUTE_START_INTERVAL)
