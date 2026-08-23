@@ -1,9 +1,14 @@
-"""The queries behind `veikkaus horse`.
+"""The queries behind `veikkaus stats`.
 
 Each test pins one of the traps `horse_stats` exists to handle once: the
 withdrawn entries that carry equipment but never raced, a horse whose name
 Veikkaus spells three ways, a start with no placement that is still a start,
 and the unknown start interval that must not pass for a quick turnaround.
+
+Every `hstart` row belongs to one horse **and** to one trainer, so the generic
+tests read the same archive twice — once per `horse_stats.Subject` — with no
+second fixture and no duplicated expectations. A subject whose FROM clause
+counts the wrong rows fails against the fixture the other subject passes.
 """
 import duckdb
 import pytest
@@ -30,20 +35,29 @@ def hstart(meet_date, horse_key, *, race_number=1, program_number=1, placement=N
            absent=None, front='K', rear='K', cart='E', interval=None,
            distance_code='ke', auto_start=DERIVE, gallop=None,
            placing_raw=None, dq=None, start_track=None, win_odd=None,
-           prize_won=None):
+           prize_won=None, horse_name=None, horse_id=None, trainer='T1',
+           trainer_name='Pasi Vaittinen', driver=None, driver_first='Santtu',
+           driver_last='Raitala'):
     """A heppa_start row with only the columns these tests care about set.
 
     `auto_start` defaults to what parse_heppa_auto_start() would make of
     `distance_code`, because that is the only way the column is ever filled.
+
+    The trainer and the driver default to one person each, so every row a
+    fixture writes is one trainer's row as well as one horse's. `horse_name`
+    defaults to the key, because a trainer's start list names the horse and a
+    NULL there would be a blank column in every test.
     """
     row = [None] * HEPPA_START_COLUMNS
     row[0], row[1], row[2], row[3] = meet_date, 'TK', race_number, program_number
-    row[4] = horse_key
+    row[4], row[5], row[6] = horse_key, horse_id, horse_name or horse_key
     row[9], row[11] = start_track, distance_code
     row[12], row[13], row[14] = placing_raw, placement, dq
     row[15], row[16] = gallop, absent
     row[19] = _auto(distance_code) if auto_start is DERIVE else auto_start
     row[21], row[22] = prize_won, win_odd
+    row[25], row[26], row[27] = driver, driver_first, driver_last
+    row[29], row[30] = trainer, trainer_name
     row[33], row[34], row[35] = front, rear, cart
     row[41] = interval
     return tuple(row)
@@ -60,22 +74,37 @@ def db():
     return ArchiveDb(conn)
 
 
+HORSE_KEY = 'boomer|2015'
+TRAINER_ID = 'T1'
+
+
+@pytest.fixture(params=[(horse_stats.HORSE, HORSE_KEY), (horse_stats.TRAINER, TRAINER_ID)],
+                ids=['horse', 'trainer'])
+def who(request):
+    """The same rows, read as one horse and as one trainer.
+
+    Every `hstart` puts its row under both, so the two subjects see the same
+    counts and the tests below keep one set of literals.
+    """
+    return request.param
+
+
 def axis(title):
     """One breakdown by name, since the SQL is generated per axis now."""
     return next(a for a in horse_stats.BREAKDOWNS if a.title.startswith(title))
 
 
-def overall(db, key='boomer|2015'):
-    return horse_stats.fetch(db.conn, axis('Overall').breakdown, [key])[1][0]
+def overall(db, key=HORSE_KEY, subject=horse_stats.HORSE):
+    return horse_stats.fetch(db.conn, axis('Overall').breakdown(subject), [key])[1][0]
 
 
-def rows_of(db, one, key='boomer|2015'):
-    return horse_stats.fetch(db.conn, one.breakdown, [key])[1]
+def rows_of(db, one, key=HORSE_KEY, subject=horse_stats.HORSE):
+    return horse_stats.fetch(db.conn, one.breakdown(subject), [key])[1]
 
 
-def starts_of(db, one, bucket=None, key='boomer|2015'):
+def starts_of(db, one, bucket=None, key=HORSE_KEY, subject=horse_stats.HORSE):
     """The drill-down behind one bucket row: (column names, rows)."""
-    return horse_stats.bucket_starts(db.conn, one, key, bucket)
+    return horse_stats.bucket_starts(db.conn, subject, one, key, bucket)
 
 
 # --- absent, and what a start is ------------------------------------------
@@ -105,18 +134,30 @@ def test_a_start_with_no_placement_still_counts_as_a_start(db):
     assert overall(db) == (1, 0, 0, 0, 0)
 
 
-def test_every_breakdown_sums_back_to_the_overall_start_count(db):
-    """The one check that catches a NULL falling out of a grouping."""
+def test_every_breakdown_sums_back_to_the_overall_start_count(db, who):
+    """The one check that catches a NULL falling out of a grouping.
+
+    The capped axis is exempt, and the exemption is asserted rather than
+    tolerated: a top-3 breakdown may not sum back, but it may never show a
+    fourth row or claim more starts than the subject has. Its title is what
+    tells a reader the same thing.
+    """
+    subject, key = who
     db.store_horses([horse('boomer|2015', 'Boomer')])
     db.store_heppa_starts([
         hstart('2026-01-01', 'boomer|2015', placement=1, interval=None),
         hstart('2026-01-20', 'boomer|2015', placement=2, front='E', cart='K', interval=19),
         hstart('2026-04-01', 'boomer|2015', rear='X', cart='X', interval=71),
     ])
-    starts = overall(db)[0]
+    starts = overall(db, key, subject)[0]
     assert starts == 3
     for one in horse_stats.BREAKDOWNS[1:]:
-        assert sum(row[1] for row in rows_of(db, one)) == starts
+        counted = sum(row[1] for row in rows_of(db, one, key, subject))
+        if one.limit:
+            assert len(rows_of(db, one, key, subject)) <= one.limit
+            assert counted <= starts
+        else:
+            assert counted == starts
 
 
 # --- identity --------------------------------------------------------------
@@ -134,7 +175,7 @@ def test_a_search_hit_on_a_name_variant_reports_the_canonical_horse_s_starts(db)
               canonical_key='humble stance (fr)|2017', birth_year=2017),
     ])
     db.store_heppa_starts([hstart('2026-01-01', 'humble stance (fr)|2017', placement=1)])
-    names, rows = horse_stats.search_horses(db.conn, 'humble stance fr')
+    names, rows = horse_stats.search(db.conn, horse_stats.HORSE, 'humble stance fr')
     assert names == ['horse', 'born', 'starts', 'canonicalKey']
     assert rows == [('Humble Stance* (FR)', 2017, 1, 'humble stance (fr)|2017')]
 
@@ -161,7 +202,7 @@ def test_a_horse_with_no_starts_is_still_a_search_hit(db):
     the Swedish simulcast, which the Finnish registry has no record of. The
     search must answer 'found it, nothing here' rather than 'no such horse'."""
     db.store_horses([horse('boomer|2015', 'Boomer')])
-    assert horse_stats.search_horses(db.conn, 'boomer')[1] == [
+    assert horse_stats.search(db.conn, horse_stats.HORSE, 'boomer')[1] == [
         ('Boomer', 2015, 0, 'boomer|2015')]
 
 
@@ -307,9 +348,10 @@ def test_a_gallop_that_still_won_counts_in_both_columns(db):
     assert overall(db) == (3, 1, 1, 0, 2)
 
 
-def test_gallops_are_counted_in_every_breakdown(db):
+def test_gallops_are_counted_in_every_breakdown(db, who):
     """One column per breakdown, not one table of its own: the question is
     always 'how often, under these conditions'."""
+    subject, key = who
     db.store_horses([horse('boomer|2015', 'Boomer')])
     db.store_heppa_starts([
         hstart('2026-01-01', 'boomer|2015', front='E', cart='K', distance_code='aly',
@@ -317,17 +359,18 @@ def test_gallops_are_counted_in_every_breakdown(db):
         hstart('2026-01-08', 'boomer|2015', interval=7, gallop=False),
     ])
     for one in horse_stats.BREAKDOWNS:
-        assert sum(row[-1] for row in rows_of(db, one)) == 1
+        assert sum(row[-1] for row in rows_of(db, one, key, subject)) == 1
 
 
-def test_gallop_is_the_last_column_of_every_breakdown(db):
+def test_gallop_is_the_last_column_of_every_breakdown(db, who):
     """The TUI puts its blank spacer column in front of the last cell, so the
     gallop count has to stay there. Appending a column to PLACINGS without
     moving the spacer would separate the wrong pair."""
+    subject, key = who
     db.store_horses([horse('boomer|2015', 'Boomer')])
     db.store_heppa_starts([hstart('2026-01-01', 'boomer|2015')])
     for one in horse_stats.BREAKDOWNS:
-        assert horse_stats.fetch(db.conn, one.breakdown, ['boomer|2015'])[0][-1] == 'gallop'
+        assert horse_stats.fetch(db.conn, one.breakdown(subject), [key])[0][-1] == 'gallop'
 
 
 # --- drilling down ---------------------------------------------------------
@@ -352,22 +395,30 @@ def spread(db):
     ])
 
 
-def test_every_bucket_drills_down_to_exactly_its_starts(db):
+def test_every_bucket_drills_down_to_exactly_its_starts(db, who):
     """The invariant the generated SQL exists for: one label expression means
     the count a bucket shows and the rows it opens cannot drift apart. A
-    hand-written second copy of the CASE logic is what this would catch."""
+    hand-written second copy of the CASE logic is what this would catch.
+
+    True of the capped axis too: the cap trims which buckets are on screen, and
+    a bucket that is on screen still opens exactly what it says.
+    """
+    subject, key = who
     spread(db)
     for one in horse_stats.BREAKDOWNS:
-        for row in rows_of(db, one):
+        for row in rows_of(db, one, key, subject):
             bucket = row[0] if one.label else None
             starts = row[1] if one.label else row[0]
-            assert len(starts_of(db, one, bucket)[1]) == starts, (one.title, bucket)
+            assert len(starts_of(db, one, bucket, key, subject)[1]) == starts, (
+                one.title, bucket)
 
 
-def test_the_overall_row_drills_down_to_every_start(db):
+def test_the_overall_row_drills_down_to_every_start(db, who):
     """Overall has no label, so it groups nothing and filters nothing."""
+    subject, key = who
     spread(db)
-    assert len(starts_of(db, axis('Overall'))[1]) == overall(db)[0] == 5
+    assert (len(starts_of(db, axis('Overall'), None, key, subject)[1])
+            == overall(db, key, subject)[0] == 5)
 
 
 def test_absent_starts_never_appear_in_a_drill_down(db):
@@ -431,11 +482,18 @@ def test_the_start_list_is_newest_first(db):
         ('2026-01-01', 1)]
 
 
-def test_every_axis_drills_down_to_the_same_columns(db):
-    """One column set for all six is what lets the panel be one widget."""
+def test_every_axis_drills_down_to_the_same_columns(db, who):
+    """One column set for all seven is what lets the panel be one widget.
+
+    Within a subject, not across: a trainer's list names the horse and a
+    horse's does not, and what matters is that one panel renders every axis of
+    whichever subject is on screen.
+    """
+    subject, key = who
     spread(db)
-    assert len({tuple(starts_of(db, one, (rows_of(db, one)[0][0] if one.label else None))[0])
-                for one in horse_stats.BREAKDOWNS}) == 1
+    assert len({tuple(starts_of(
+        db, one, (rows_of(db, one, key, subject)[0][0] if one.label else None),
+        key, subject)[0]) for one in horse_stats.BREAKDOWNS}) == 1
 
 
 def test_the_start_list_carries_the_post_the_odds_and_the_prize(db):
@@ -455,3 +513,141 @@ def test_the_start_list_carries_the_post_the_odds_and_the_prize(db):
     names, rows = starts_of(db, axis('Overall'))
     assert [(row[names.index('lane')], row[names.index('odds')], row[names.index('prize')])
             for row in rows] == [(1, None, 0), (12, None, 0), (5, '10.02', 2200)]
+
+
+# --- the trainer subject ---------------------------------------------------
+#
+# A trainer asks the same seven questions of the same table; only the FROM
+# clause and the drill-down's horse column differ. These pin the parts that are
+# not shared, and the one that would be quietly wrong if the horse subject's
+# FROM clause were reused.
+
+
+def test_a_trainer_s_starts_include_a_horse_with_no_resolved_identity(db):
+    """The reason _TRAINER_FROM joins nothing. 27,430 of the archive's 293,843
+    non-absent rows — 9 % — have a NULL horseKey, because
+    RECOMPUTE_HEPPA_START_HORSEKEY never reached them; mostly local and pony
+    meetings. They are starts the trainer really had, and joining archive.horse
+    the way the horse subject must would drop every one of them without an
+    error anywhere. The horse's name is on the row, so nothing is lost."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', horse_name='Boomer', placement=1),
+        hstart('2026-01-01', None, program_number=2, horse_name='Nameless', placement=2),
+    ])
+    assert overall(db, TRAINER_ID, horse_stats.TRAINER) == (2, 1, 1, 0, 0)
+    assert overall(db) == (1, 1, 0, 0, 0)
+    names, rows = starts_of(db, axis('Overall'), None, TRAINER_ID, horse_stats.TRAINER)
+    assert [row[names.index('horse')] for row in rows] == ['Boomer', 'Nameless']
+
+
+def test_two_trainers_with_the_same_name_are_counted_apart(db):
+    """35 of the archive's 4,630 trainer names belong to two different people,
+    which is why the identity is the 19-digit id and never the name."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', placement=1),
+        hstart('2026-01-01', 'boomer|2015', program_number=2, trainer='T2', placement=2),
+        hstart('2026-01-08', 'boomer|2015', trainer='T2'),
+    ])
+    assert overall(db, 'T1', horse_stats.TRAINER) == (1, 1, 0, 0, 0)
+    assert overall(db, 'T2', horse_stats.TRAINER) == (2, 0, 1, 0, 0)
+    rows = horse_stats.search(db.conn, horse_stats.TRAINER, 'pasi')[1]
+    assert [(row[0], row[1], row[-1]) for row in rows] == [
+        ('Pasi Vaittinen', 2, 'T2'), ('Pasi Vaittinen', 1, 'T1')]
+
+
+def test_a_trainer_search_is_grouped_on_the_id_and_returns_it_last(db):
+    """The hit list's contract: the last column is the identity the caller
+    passes back, and `horses`/`years` are the disambiguator the shared names
+    force, since a 19-digit id is not something to read."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', horse_id='H1'),
+        hstart('2027-02-03', 'boomer|2015', horse_id='H1', race_number=2),
+    ])
+    names, rows = horse_stats.search(db.conn, horse_stats.TRAINER, 'pasi')
+    assert names == ['trainer', 'starts', 'horses', 'years', 'trainerId']
+    assert rows == [('Pasi Vaittinen', 2, 1, '2026-2027', 'T1')]
+
+
+def test_a_pasted_trainer_id_finds_that_trainer_and_not_its_withdrawals(db):
+    """Pasting an id from a start list is a real thing to want, so the id arm is
+    `= ?` rather than a LIKE. The parentheses around the OR are what keep the
+    absent filter on both arms: without them a pasted id lists withdrawals."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', horse_id='H1'),
+        hstart('2026-01-01', 'boomer|2015', program_number=2, horse_id='H2', absent=True),
+    ])
+    assert horse_stats.search(db.conn, horse_stats.TRAINER, 'T1')[1] == [
+        ('Pasi Vaittinen', 1, 1, '2026-2026', 'T1')]
+
+
+def test_a_trainer_search_counts_horses_by_registry_id_not_by_name(db):
+    """Names repeat across origin countries — Elliot and Elliot (DK), both
+    foaled 2016, are two real horses — so counting the string would report one
+    horse where the registry knows two."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', horse_id='H1', horse_name='Elliot'),
+        hstart('2026-01-01', 'boomer|2015', program_number=2, horse_id='H2',
+               horse_name='Elliot'),
+    ])
+    assert horse_stats.search(db.conn, horse_stats.TRAINER, 'pasi')[1][0][2] == 2
+
+
+def test_the_trainer_start_list_names_the_horse_first(db):
+    """A trainer's drill-down answers 'which of mine ran', so the horse leads
+    and the ten shared columns follow unchanged."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([hstart('2026-01-01', 'boomer|2015')])
+    names, _ = starts_of(db, axis('Overall'), None, TRAINER_ID, horse_stats.TRAINER)
+    assert names == ['horse', 'date', 'trk', 'race', 'dist', 'lane', 'plc', 'km time',
+                     'odds', 'prize', 'driver']
+
+
+# --- the driver axis -------------------------------------------------------
+
+
+def four_drivers(db):
+    """One subject, four drivers, one more start each than the next."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart(f'2026-01-{day:02d}', 'boomer|2015', driver_first=first,
+               driver_last='Ahonen')
+        for first, days in (('Aki', (1, 2, 3, 4)), ('Bea', (5, 6, 7)),
+                            ('Cid', (8, 9)), ('Dan', (10,)))
+        for day in days])
+
+
+def test_the_driver_breakdown_keeps_only_the_three_busiest(db):
+    """The one capped axis. A horse has a median of 4 drivers and a trainer a
+    mean of 7.9 (max 131), so an uncapped panel would be a wall; the cap is
+    named in the axis title because the table then does not sum back."""
+    four_drivers(db)
+    assert [(row[0], row[1]) for row in rows_of(db, axis('Driver'))] == [
+        ('Aki Ahonen', 4), ('Bea Ahonen', 3), ('Cid Ahonen', 2)]
+
+
+def test_a_driver_cut_by_the_cap_is_still_a_bucket_that_opens(db):
+    """The cap is on the breakdown and not on `starts`: a bucket on screen opens
+    exactly its count, and the query behind a bucket knows nothing about how
+    many buckets were displayed."""
+    four_drivers(db)
+    assert len(starts_of(db, axis('Driver'), 'Aki Ahonen')[1]) == 4
+    assert len(starts_of(db, axis('Driver'), 'Dan Ahonen')[1]) == 1
+
+
+def test_the_driver_label_is_the_full_name_not_the_short_form(db):
+    """`driverName` is the short form and it is not reliable: 113 driver ids
+    carry a second, different person's short name on a few rows each, so Santtu
+    Raitala's 9,212 archive starts include one reading 'V Stenman'. Grouping on
+    it would split a driver's row and could cost them a place in the top
+    three."""
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', driver='S Raitala'),
+        hstart('2026-01-08', 'boomer|2015', driver='V Stenman'),
+    ])
+    assert rows_of(db, axis('Driver')) == [('Santtu Raitala', 2, 0, 0, 0, 0)]

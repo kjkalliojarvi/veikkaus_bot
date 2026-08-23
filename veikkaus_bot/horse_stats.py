@@ -1,6 +1,7 @@
-"""One horse's registry starts, counted every way the TUI shows them.
+"""One horse's — or one trainer's — registry starts, counted every way the TUI
+shows them.
 
-The query layer behind `veikkaus horse`. Read-only, and deliberately free of
+The query layer behind `veikkaus stats`. Read-only, and deliberately free of
 any UI import: every function takes an open connection, so the SQL is testable
 against an in-memory archive the way the rest of the suite tests SQL.
 
@@ -24,9 +25,17 @@ Each breakdown is an `Axis`, and the label expression that names its buckets is
 written once: the aggregate selects it, and the drill-down behind a clicked
 bucket compares against it. See `Axis`.
 
+**Whose starts are being counted is a `Subject`, and nothing else varies.** A
+horse and a trainer are the same seven questions asked of the same table, so a
+second module would be a second definition of what '<= 14 days' means, free to
+drift — the trap `crosscheck.py` avoids by building every report on
+`archive_db.HEPPA_START_BRIDGE` rather than a hand-copied lookalike. See
+`Subject`.
+
 Run it directly to iterate on the SQL without starting Textual:
 
     uv run python -m veikkaus_bot.horse_stats 'com milton'
+    uv run python -m veikkaus_bot.horse_stats 'koivunen' trainer
 """
 from typing import NamedTuple
 
@@ -57,10 +66,24 @@ PLACINGS = """count(*)                                 AS starts,
 # RECOMPUTE_HEPPA_START_HORSEKEY and RECOMPUTE_HORSE_IDENTITY both write
 # min(horseKey) over the same registry group — but grouping on horseKey would be
 # one recompute away from answering for a fraction of a career.
-_FROM = f"""
+_HORSE_FROM = f"""
     FROM archive.heppa_start hs
     JOIN archive.horse h ON h.horseKey = hs.horseKey
     WHERE h.canonicalKey = ? AND {NOT_ABSENT}
+"""
+
+# A trainer is identified by `trainerId`, never by the name. Both are non-NULL
+# on all 314,981 rows and every id maps to exactly one name, but 4,665 ids carry
+# only 4,630 distinct names: 35 names belong to two different people, and
+# grouping on the name would report one career for two.
+#
+# **The absence of a join is the load-bearing part.** Joining archive.horse the
+# way the horse subject must would cost the 27,430 non-absent rows
+# RECOMPUTE_HEPPA_START_HORSEKEY never reached — 9 % of them, starts the trainer
+# really had — and nothing here needs that table: `hs.horseName` is on the row.
+_TRAINER_FROM = f"""
+    FROM archive.heppa_start hs
+    WHERE hs.trainerId = ? AND {NOT_ABSENT}
 """
 
 # Two stages, and that is the whole point of this query.
@@ -79,7 +102,7 @@ _FROM = f"""
 # because 5,419 of 17,099 horses have no heppa_start row and must still be
 # findable; and starts DESC because the horse you meant is the one that raced
 # most, not the one whose name sorts first.
-SQL_SEARCH = """
+SQL_SEARCH_HORSES = """
     WITH matched AS (
         SELECT DISTINCT canonicalKey
         FROM archive.horse
@@ -96,6 +119,42 @@ SQL_SEARCH = """
     LEFT JOIN archive.heppa_start hs ON hs.horseKey = h.horseKey
     GROUP BY h.canonicalKey
     ORDER BY starts DESC, horse
+    LIMIT ?
+"""
+
+# The trainer search, and every way it differs from the horse search above is
+# deliberate.
+#
+# One stage, not two: there is no canonicalisation to resolve, because one
+# trainerId is one trainer — the horse's 365 keys for 182 animals have no
+# counterpart here. No replace(name, '*', ''), which is a horse-name quirk. And
+# no LEFT JOIN arm: a horse exists in archive.horse whether or not it ever
+# started, so 'found it, nothing here' is a state that search has to render,
+# while a trainer exists only as a start row and cannot be in it.
+#
+# `horses` and `years` are not decoration — they are the disambiguator the 35
+# shared names force, because the identity is 19 digits and is not something to
+# read. count(DISTINCT horseId) rather than horseName: the registry id is stable
+# where a name is a string, and it needs no join.
+#
+# **The parentheses around the OR are load-bearing.** Without them the absent
+# filter binds to the id arm alone, and a pasted id lists withdrawn entries.
+#
+# `trainerId = ?` rather than a LIKE on a 19-digit number: pasting an id means
+# that exact id, and it keeps the parameters (term, term, limit) for both
+# subjects, so `search()` needs to know nothing about which one it is running.
+SQL_SEARCH_TRAINERS = f"""
+    SELECT any_value(hs.trainerName)                        AS trainer,
+           count(*)                                         AS starts,
+           count(DISTINCT hs.horseId)                       AS horses,
+           substr(min(hs.meetDate), 1, 4) || '-'
+             || substr(max(hs.meetDate), 1, 4)              AS years,
+           hs.trainerId                                     AS trainerId
+    FROM archive.heppa_start hs
+    WHERE (lower(hs.trainerName) LIKE '%' || lower(?) || '%' OR hs.trainerId = ?)
+      AND {NOT_ABSENT}
+    GROUP BY hs.trainerId
+    ORDER BY starts DESC, trainer
     LIMIT ?
 """
 
@@ -138,12 +197,21 @@ _AUTO = """CASE hs.autoStart WHEN true THEN 'auto' WHEN false THEN 'volt'
 # numeric key, and DuckDB takes it in GROUP BY and ORDER BY without it reaching
 # the SELECT list, so the sort key never shows up in the table.
 #
-# NULL is its own bucket, and per horse it means exactly one thing: `absent` is
-# filtered above, and the 27,430 rows RECOMPUTE_HEPPA_START_HORSEKEY never
+# NULL is its own bucket, and *for a horse* it means exactly one thing: `absent`
+# is filtered above, and the 27,430 rows RECOMPUTE_HEPPA_START_HORSEKEY never
 # reached have no horseKey to join on at all. What is left is a start with no
 # known predecessor across the three start-bearing tables — at most one row per
 # horse. Never `startInterval > 10000` here: that sentinel is prev_start's, and
 # heppa_start says unknown with NULL.
+#
+# **That collapse is conditional on the subject, and the label over-claims for a
+# trainer.** startInterval is the *horse's* gap whoever trained it, which is a
+# fair trainer question, but _TRAINER_FROM does not join archive.horse, so a
+# trainer's NULL bucket mixes each of its horses' earliest known starts with the
+# rows that have no identity at all, and it is no longer at most one row —
+# 38,351 non-absent rows are NULL archive-wide. The string stays as it is
+# because it is right for a horse and two tests pin it; the LEGEND carries the
+# caveat that is true for both.
 _LAYOFF = """CASE WHEN hs.startInterval IS NULL THEN 'unknown (no earlier start known)'
                       WHEN hs.startInterval <= 14   THEN '<= 14 days'
                       WHEN hs.startInterval <= 30   THEN '15-30 days'
@@ -155,6 +223,23 @@ _LAYOFF_ORDER = """CASE WHEN hs.startInterval IS NULL THEN 4
                             WHEN hs.startInterval <= 30   THEN 1
                             WHEN hs.startInterval <= 60   THEN 2
                                                           ELSE 3 END"""
+
+# The full name, and not either of the two columns that look more like an
+# identity.
+#
+# `driverName` is the short form ('S Raitala') and it is not reliable: 113 ids
+# carry a second, *different* person's short name on a handful of rows each, so
+# Santtu Raitala's 9,212 starts include one reading 'V Stenman'. Grouping on it
+# would split a driver's row and could cost them a place in the top three below.
+# `driverId` is clean — zero ids carry more than one first+last name — but it is
+# 19 digits, and a bucket label is read.
+#
+# So the label is the full name: non-NULL and never partial on any of the
+# 293,843 non-absent rows, which is data rather than construction, so no
+# coalesce is needed. 3,138 distinct values against 3,143 ids — 5 names belong
+# to two people (557 starts, 0.19 %) and merge into one bucket. The drill-down
+# merges identically, so the count a bucket shows is still the count it opens.
+_DRIVER = "hs.driverFirstName || ' ' || hs.driverLastName"
 
 # The individual starts behind a bucket. Compact on purpose — the identity of
 # the start, the conditions it ran under, how it went, and who drove.
@@ -183,8 +268,38 @@ START_COLUMNS = """hs.meetDate AS date, hs.trackCode AS trk, hs.raceNumber AS ra
            hs.prizeWon AS prize, hs.driverName AS driver"""
 
 
+class Subject(NamedTuple):
+    """Whose starts a breakdown counts — a horse, or a trainer.
+
+    The `BREAKDOWNS` below say how to group a set of `heppa_start` rows; a
+    Subject says *which* rows, and what a drill-down lists behind one bucket.
+    Nothing else differs: the label expressions, PLACINGS, the orderings and the
+    absent filter are the same questions asked of the same table.
+
+    `frm` is the contract, and it is three things at once. The table is aliased
+    `hs`, because every shared expression above says `hs.`. It takes exactly one
+    `?`, the identity, so `bucket_starts` can build the parameters without
+    knowing the subject. And it *ends* in a WHERE, so `Axis.starts` can hang
+    `AND <label> = ?` off it.
+    """
+
+    name: str        # the noun the UI puts in its prompt and its messages
+    frm: str         # FROM … WHERE <identity> = ? AND NOT absent
+    columns: str     # the drill-down's SELECT list
+    search: str      # (display…, identity last), given (term, term, limit)
+
+
+HORSE = Subject('horse', _HORSE_FROM, START_COLUMNS, SQL_SEARCH_HORSES)
+
+# The horse column the horse view has no use for: a trainer's start list is
+# 'which of mine ran', so it goes first and the ten shared columns follow
+# unchanged. hs.horseName rather than a join, for the reason on _TRAINER_FROM.
+TRAINER = Subject('trainer', _TRAINER_FROM,
+                  f'hs.horseName AS horse, {START_COLUMNS}', SQL_SEARCH_TRAINERS)
+
+
 class Axis(NamedTuple):
-    """One way of grouping a horse's starts, and both queries about it.
+    """One way of grouping a subject's starts, and both queries about it.
 
     `label` is the SQL expression that produces the bucket label, and it is
     written **once**: `breakdown` selects it as the group column and `starts`
@@ -202,7 +317,13 @@ class Axis(NamedTuple):
     are NULL on zero archive rows today, which is data and not construction.
 
     `Overall` has no label. It groups nothing and filters nothing, so clicking
-    it lists every start the horse has.
+    it lists every start the subject has.
+
+    `limit` caps the **breakdown** and nothing else. `starts` stays uncapped, so
+    a bucket that is on screen still opens exactly the count it shows; capping
+    both would break the one invariant this class exists to hold. A capped axis
+    therefore does not sum back to the overall start count, which is why the
+    only one that has a limit says so in its title.
     """
 
     title: str
@@ -210,32 +331,45 @@ class Axis(NamedTuple):
     label: str | None = None
     order: str = 'starts DESC'
     sort: str | None = None      # a numeric sort key, where the label sorts wrong
+    limit: int | None = None     # keep only the busiest N buckets
 
-    @property
-    def breakdown(self) -> str:
+    def breakdown(self, subject: Subject) -> str:
         """Starts, placings and gallops per bucket."""
         if self.label is None:
-            return f'SELECT {PLACINGS} {_FROM}'
+            return f'SELECT {PLACINGS} {subject.frm}'
         group = f'GROUP BY 1, {self.sort}' if self.sort else 'GROUP BY 1'
+        cap = f' LIMIT {self.limit}' if self.limit else ''
         return (f'SELECT {self.label} AS "{self.column}", {PLACINGS} '
-                f'{_FROM} {group} ORDER BY {self.order}')
+                f'{subject.frm} {group} ORDER BY {self.order}{cap}')
 
-    @property
-    def starts(self) -> str:
-        """The individual starts behind one bucket, newest first."""
+    def starts(self, subject: Subject) -> str:
+        """The individual starts behind one bucket, newest first.
+
+        programNumber breaks the ties, because a trainer can have two horses in
+        one race and a two-column order over (date, race) is no longer total. A
+        no-op for a horse, which cannot be in one race twice.
+        """
         bucket = '' if self.label is None else f'AND {self.label} = ?'
-        return (f'SELECT {START_COLUMNS} {_FROM} {bucket} '
-                f'ORDER BY hs.meetDate DESC, hs.raceNumber DESC')
+        return (f'SELECT {subject.columns} {subject.frm} {bucket} '
+                f'ORDER BY hs.meetDate DESC, hs.raceNumber DESC, hs.programNumber')
 
 
 # crosscheck.REPORTS's shape, one entry per axis: the UI builds a labelled table
-# per entry in a loop, so a seventh breakdown is one line here and no widget
+# per entry in a loop, so an eighth breakdown is one line here and no widget
 # code. The shoe combinations involving X are kept as they are rather than
 # folded into the majority or into one 'unknown' — the K/E/X codes stay verbatim
 # through the whole pipeline, and X is 'not reported' rather than a third kind
 # of shoeing, so folding it either invents shoeings or hides starts. specialCart
 # is Heppa's americanSulkyKEX (K = yes, E = no, X = not reported) and gets the
 # same treatment, glossed once in the UI legend.
+#
+# Driver is the one capped axis, and the cap is **named in the title** because
+# it is the one breakdown that does not sum back to Overall: the top three cover
+# 79.6 % of a horse's starts and 75.2 % of a trainer's (median 4 drivers per
+# horse, mean 7.9 per trainer, max 131). A cap that did not say so would read as
+# a complete table. The `, driver` tiebreak is what makes the cut deterministic
+# rather than whichever equal row DuckDB happened to return — 970 trainers have
+# a starts tie straddling the third and fourth driver.
 BREAKDOWNS = (
     Axis('Overall'),
     Axis('Shoes (front / rear)', 'shoes',
@@ -247,6 +381,8 @@ BREAKDOWNS = (
     Axis('Start type', 'start type', _AUTO, 'starts DESC, "start type"'),
     Axis('Days since previous start', 'days since previous', _LAYOFF,
          _LAYOFF_ORDER, _LAYOFF_ORDER),
+    Axis('Driver (top 3 by starts)', 'driver', _DRIVER, 'starts DESC, driver',
+         limit=3),
 )
 
 SEARCH_LIMIT = 50
@@ -262,37 +398,41 @@ def fetch(conn, sql: str, params=()):
     return [d[0] for d in conn.description], rows
 
 
-def search_horses(conn, term: str, limit: int = SEARCH_LIMIT):
-    """Horses whose name or key contains `term`, most starts first.
+def search(conn, subject: Subject, term: str, limit: int = SEARCH_LIMIT):
+    """Subjects whose name or identity contains `term`, most starts first.
 
-    One row per horse — per `canonicalKey`, so the three ways Veikkaus spells
-    `Humble Stance` are one hit. The last column is the key, for the caller to
-    pass back to `breakdowns()`.
+    One row per identity — per `canonicalKey` for a horse, so the three ways
+    Veikkaus spells `Humble Stance` are one hit; per `trainerId` for a trainer.
+    The last column is that identity, for the caller to pass back to
+    `Axis.breakdown`; the first is what to display for it.
     """
-    return fetch(conn, SQL_SEARCH, [term, term, limit])
+    return fetch(conn, subject.search, [term, term, limit])
 
 
-def bucket_starts(conn, axis: Axis, canonical_key: str, label: str | None = None):
-    """The individual starts behind one row of `axis.breakdown`.
+def bucket_starts(conn, subject: Subject, axis: Axis, key: str, label: str | None = None):
+    """The individual starts behind one row of `axis.breakdown(subject)`.
 
     `label` is that row's bucket, and it is ignored for `Overall`, which has no
     label expression to compare it against.
     """
-    params = [canonical_key] if axis.label is None else [canonical_key, label]
-    return fetch(conn, axis.starts, params)
+    params = [key] if axis.label is None else [key, label]
+    return fetch(conn, axis.starts(subject), params)
 
 
 if __name__ == '__main__':
     import sys
 
     term = sys.argv[1] if len(sys.argv) > 1 else ''
+    who = TRAINER if len(sys.argv) > 2 and sys.argv[2].startswith('t') else HORSE
     with db_read(DEFAULT_DB) as connection:
-        names, hits = search_horses(connection, term)
-        print(f'{len(hits)} hit(s) for {term!r}: ' + ', '.join(f'{r[0]} ({r[2]})' for r in hits[:5]))
+        names, hits = search(connection, who, term)
+        count = names.index('starts')
+        print(f'{len(hits)} {who.name}(s) for {term!r}: '
+              + ', '.join(f'{r[0]} ({r[count]})' for r in hits[:5]))
         if hits:
             key = hits[0][-1]
             for axis in BREAKDOWNS:
-                columns, rows = fetch(connection, axis.breakdown, [key])
+                columns, rows = fetch(connection, axis.breakdown(who), [key])
                 print(f'\n=== {key} — {axis.title} ===')
                 print('  ' + '  '.join(str(c) for c in columns))
                 for row in rows:
