@@ -1,7 +1,8 @@
 import pytest
 
 from veikkaus_bot.models import HeppaHorse, HeppaStart, Runner
-from veikkaus_bot.parse import (_captured_at, base_horse_key, betpercentage_records,
+from veikkaus_bot.models import HeppaHorseStats
+from veikkaus_bot.parse import (heppa_horse_stat_records,_captured_at, base_horse_key, betpercentage_records,
                                 blank_to_none, heppa_horse_record,
                                 heppa_start_record, horse_key, is_placeholder,
                                 normalize_name, parse_heppa_auto_start,
@@ -505,3 +506,94 @@ def test_heppa_horse_record_survives_a_payload_with_only_an_id():
     row = horse_field(heppa_horse_record(HeppaHorse(id='123')))
     assert row['horseId'] == '123'
     assert row['sireId'] is None and row['ueln'] is None
+
+
+# --- the starts abroad -----------------------------------------------------
+
+
+# Bollnas 2026-08-16 race 4 as Heppa really sends it: programNumber '0' for
+# every runner, because the registry records our horses' starts abroad without
+# the foreign programme's saddle numbers, and finnishTrack False.
+FATHER = {'date': '2026-08-16', 'trackCode': 'BO', 'startNumber': '4',
+          'programNumber': '0', 'horseId': '1234567890123456789',
+          'horseName': 'Father', 'placing': '7', 'shortKilometerTime': '15,5',
+          'distance': '2140', 'distanceCode': 'ake', 'lane': '1',
+          'shoesFront': 'K', 'shoesBack': 'K', 'driverName': 'L Eriksson',
+          'trainerName': 'Miika Tenhunen', 'price': '0', 'finnishTrack': False}
+
+
+def test_a_start_abroad_is_marked_and_otherwise_reads_like_any_other():
+    """finnishTrack is the only thing distinguishing it, and everything a
+    breakdown needs is there: Heppa serves these through the same endpoints and
+    they are as rich as the home ones."""
+    record = heppa_start_record(HeppaStart(**FATHER))
+    row = heppa_field(record)
+    assert record[-1] is False           # finnishTrack, the last column
+    assert row['programNumber'] == 0     # as sent, and why horseId is in the key
+    assert (row['placement'], row['kmTimeMs'], row['distance']) == (7, 75500, 2140)
+    assert (row['distanceCode'], row['autoStart']) == ('ake', True)
+    assert (row['startTrack'], row['horseId']) == (1, '1234567890123456789')
+
+
+def test_a_home_start_is_marked_too_rather_than_left_unsaid():
+    """The flag is on both payloads, so a NULL means an older parse and not a
+    home meeting — which is what lets the migration stamp TRUE on what it finds
+    and the queries read `coalesce(finnishTrack, true)`."""
+    assert heppa_start_record(HeppaStart(**(BOOMER | {'finnishTrack': True})))[-1] is True
+
+
+# --- the registry's own career totals --------------------------------------
+
+
+# Combat Fighter's, trimmed: 81 career starts against the 27 the archive holds,
+# which is the whole reason this endpoint is crawled.
+COMBAT = {'id': '7436734944343982278',
+          'total': {'year': '0', 'starts': '81', 'firstPlaces': '23',
+                    'priceMoney': '369642', 'record': '11,5', 'recordType': 'ly',
+                    'bestRecordOfYear': '-'},
+          'stats': [{'year': '2026', 'starts': '16', 'firstPlaces': '1'},
+                    {'year': '2025', 'starts': '14', 'firstPlaces': '7'}],
+          'monteTotal': {'year': '0', 'starts': '0'},
+          'monteStats': []}
+
+
+def stat_field(record):
+    """Read a heppa_horse_stat record back by column name."""
+    names = ('horseId year monte starts firstPlaces secondPlaces thirdPlaces gallops '
+             'disqualifications priceMoney priceMoneyPerStart winningPercent '
+             'placementPercent gallopPercentage disqualificationPercentage record '
+             'recordType recordMonte carRecord carRecordType carRecordMonte '
+             'bestRecordOfYear bestRecordOfAllTime').split()
+    return dict(zip(names, record))
+
+
+def test_the_career_total_and_each_season_become_rows():
+    rows = [stat_field(r) for r in heppa_horse_stat_records(HeppaHorseStats(**COMBAT))]
+    flat = [r for r in rows if not r['monte']]
+    assert [(r['year'], r['starts']) for r in flat] == [
+        ('0', 81), ('2026', 16), ('2025', 14)]
+    assert flat[0]['priceMoney'] == 369642
+    assert flat[0]['record'] == '11,5'
+
+
+def test_the_monte_career_is_kept_apart_from_the_flat_one():
+    """Both totals are `year` '0', so without `monte` in the key one would
+    replace the other and a monte record would read as a sulky record."""
+    rows = [stat_field(r) for r in heppa_horse_stat_records(HeppaHorseStats(**COMBAT))]
+    assert sorted((r['year'], r['monte']) for r in rows) == [
+        ('0', False), ('0', True), ('2025', False), ('2026', False)]
+
+
+def test_a_dash_in_a_record_field_does_not_become_a_record():
+    """Heppa writes '-' for an absent value, and a horse with no best-of-year is
+    not a horse whose best time was '-'."""
+    rows = [stat_field(r) for r in heppa_horse_stat_records(HeppaHorseStats(**COMBAT))]
+    assert rows[0]['bestRecordOfYear'] is None
+
+
+def test_a_stat_line_with_no_year_is_dropped():
+    """`year` is a third of the primary key, so a line that cannot say which
+    season it counts is not a fact about anything."""
+    payload = COMBAT | {'stats': [{'starts': '9'}], 'monteTotal': None}
+    rows = heppa_horse_stat_records(HeppaHorseStats(**payload))
+    assert [stat_field(r)['year'] for r in rows] == ['0']

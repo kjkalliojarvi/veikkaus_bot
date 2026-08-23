@@ -9,6 +9,9 @@ from .crawler import backfill, status
 from .crosscheck import crosscheck
 from .fetcher import DEFAULT_DELAY
 from .heppa import backfill as heppa_backfill
+from .heppa import SEED_FILE
+from .heppa import backfill_foreign as heppa_foreign
+from .heppa import backfill_horse_stats as heppa_stats
 from .heppa import backfill_horses as heppa_horses
 from .horse_tui import stats_tui
 from .parse import parse
@@ -43,7 +46,17 @@ def register_exit_handler(func):
     signal.signal(signal.SIGTERM, func)
 
 
-def sigterm_exit(_sig_func=None):
+def sigterm_exit(_signum=None, _frame=None):
+    """Leave quietly, whether SIGTERM sent us here or the dispatch tail did.
+
+    Both parameters exist because `signal.signal` calls a handler with (signum,
+    frame) and this is also called directly with neither. With only one, a real
+    SIGTERM raised TypeError *inside the handler* — so instead of exiting, the
+    crawl blew up in `time.sleep` and took `db_ops`'s `conn.close()` down with
+    it. Seen on a `heppa-foreign` run killed at 1,500 fetches; nothing was lost,
+    because DuckDB had committed each statement as it went, but the traceback
+    read like a crash rather than a stop.
+    """
     sys.exit(0)
 
 
@@ -131,6 +144,52 @@ def veikkaus():
     # (SELECT DISTINCT horseId FROM archive.heppa_start), so it has nothing to
     # do against a database it just made.
     parser_hhorses.set_defaults(func=heppa_horses)
+
+    parser_hforeign = subparser.add_parser(
+        'heppa-foreign',
+        help="Crawl the meetings abroad the archive knows about, for the starts "
+             "Finnish horses made there (run after `heppa` and `parse`)")
+    parser_hforeign.add_argument('--raw', default=DEFAULT_RAW,
+                                 help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_hforeign.add_argument('--db', default=DEFAULT_DB,
+                                 help=f'DuckDB database holding the manifest (default: {DEFAULT_DB})')
+    parser_hforeign.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                                 help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    parser_hforeign.add_argument('--limit', type=int, default=None,
+                                 help='Stop after N fetches (for a trial run)')
+    parser_hforeign.add_argument('--retry-failed', action='store_true',
+                                 help='Reset failed manifest rows to pending before crawling')
+    parser_hforeign.add_argument('--seeds', default=SEED_FILE,
+                                 help='File of `date,trackCode` meetings to add by hand, '
+                                      f'for the ones prev_start cannot name (default: {SEED_FILE})')
+    parser_hforeign.add_argument('--refetch-from', dest='refetch_start', default=None,
+                                 help='Reset already-fetched meetings from this date (yyyy-mm-dd) '
+                                      'to pending — a seeded date whose results were not out yet '
+                                      'is recorded as an empty meeting, not as a failure')
+    parser_hforeign.add_argument('--refetch-to', dest='refetch_end', default=None,
+                                 help='Last date of the refetch window (default: --refetch-from)')
+    # No --create-db, for the same reason as heppa-horses: the meetings come from
+    # archive.prev_start (heppa.FOREIGN_MEETINGS), because Heppa lists Finnish
+    # events only and there is nothing else to discover them from.
+    parser_hforeign.set_defaults(func=heppa_foreign)
+
+    parser_hstats = subparser.add_parser(
+        'heppa-stats',
+        help="Crawl the registry's own career statistics per horse, which is how "
+             "much of each career the archive is missing (run after `heppa` and "
+             "`parse`)")
+    parser_hstats.add_argument('--raw', default=DEFAULT_RAW,
+                               help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_hstats.add_argument('--db', default=DEFAULT_DB,
+                               help=f'DuckDB database holding the manifest (default: {DEFAULT_DB})')
+    parser_hstats.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                               help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    parser_hstats.add_argument('--limit', type=int, default=None,
+                               help='Stop after N fetches (for a trial run)')
+    parser_hstats.add_argument('--retry-failed', action='store_true',
+                               help='Reset failed manifest rows to pending before crawling')
+    # No --create-db: driven by the horses already in the archive, as above.
+    parser_hstats.set_defaults(func=heppa_stats)
 
     parser_parse = subparser.add_parser(
         'parse', help='Parse the raw archive into the archive.* tables')

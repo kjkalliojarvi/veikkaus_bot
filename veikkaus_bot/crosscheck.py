@@ -144,6 +144,11 @@ REPORTS = (
               GROUP BY 1 HAVING count(DISTINCT horseKey) > 1)
     """),
 
+    # `finnishTrack` is filtered, and it has to be: a meeting abroad has no
+    # Veikkaus card by design — `heppa.backfill_foreign` fetched it precisely
+    # because nothing else knows about it — so 356 of them would sit in here
+    # looking like the vocabulary gap this report exists to surface. They get
+    # their own report below.
     ('Meetings only Heppa has, and whether their horses resolved', f"""
         SELECT coalesce(e.eventType, '(unknown)') AS eventType,
                count(DISTINCT h.meetDate || h.trackCode) AS meetings,
@@ -154,8 +159,26 @@ REPORTS = (
                ON e.meetDate = h.meetDate AND e.trackCode = h.trackCode
         LEFT JOIN archive.card ca ON ca.meetDate = h.meetDate
                                  AND {heppa_track_code('ca')} = h.trackCode
-        WHERE ca.cardId IS NULL
+        WHERE ca.cardId IS NULL AND coalesce(h.finnishTrack, true)
         GROUP BY 1 ORDER BY 3 DESC
+    """),
+
+    # `heppa-foreign` is a separate opt-in, so this is empty until it has run.
+    # Heppa returns only the Finnish-registered runners of a race abroad, so
+    # `starts` is a count of our horses' starts and not of a field.
+    #
+    # `horse_resolved` is well short of every row, and legitimately so: the
+    # mapping from horseId to horseKey is built from the races *both* sources
+    # cover, so a horse whose Finnish starts fall outside the Veikkaus crawl has
+    # no archive.horse row to resolve to. Measured over the first meetings
+    # crawled, 17 of 19 at Bollnas and 8 of 12 at Taby.
+    ('Starts abroad: what the foreign crawl reached', """
+        SELECT trackCode, count(DISTINCT meetDate) AS meetings, count(*) AS starts,
+               count(DISTINCT horseId) AS horses,
+               sum(CASE WHEN horseKey IS NOT NULL THEN 1 ELSE 0 END) AS horse_resolved,
+               min(meetDate) AS first, max(meetDate) AS last
+        FROM archive.heppa_start WHERE finnishTrack = FALSE
+        GROUP BY 1 ORDER BY 3 DESC LIMIT 25
     """),
 
     # Any row here is a meeting whose results the merge cannot reach. A whole

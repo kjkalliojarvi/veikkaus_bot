@@ -4,9 +4,13 @@ import duckdb
 import pytest
 
 from veikkaus_bot.crawler import CARDS_DATE, Manifest, Task, cards_task
-from veikkaus_bot.heppa import (HEPPA_HORSE, HEPPA_HORSE_TYPES, HEPPA_RACES,
-                                HEPPA_RESULTS, HEPPA_START, HEPPA_TYPES, expand,
-                                horse_task, months, results_task)
+from veikkaus_bot import archive_db
+from veikkaus_bot.heppa import (FINNISH_TRACKS, FOREIGN_MEETINGS, HEPPA_FOREIGN_RACES,
+                                HEPPA_FOREIGN_START, HEPPA_HORSE, HEPPA_HORSE_STAT,
+                                HEPPA_HORSE_TYPES, HEPPA_RACES, HEPPA_RESULTS,
+                                HEPPA_START, HEPPA_TYPES, _foreign_races_task, expand,
+                                horse_stat_task, horse_task, months, read_seeds,
+                                results_task)
 
 
 @pytest.fixture
@@ -174,3 +178,201 @@ def test_re_enqueueing_a_known_horse_never_refetches_it(manifest):
     manifest.enqueue([task, horse_task('4605744788003903677')])
     assert [t.entityId for t in manifest.next_pending(10, HEPPA_HORSE_TYPES)] == [
         '4605744788003903677']
+
+
+# --- the meetings abroad ---------------------------------------------------
+#
+# Heppa serves a Finnish horse's foreign starts through the same per-meeting
+# endpoints as the home ones, but never lists those meetings, so they are
+# discovered from the archive instead. These pin the two halves of that: the
+# expander, and the query that decides what counts as abroad.
+
+
+def test_a_foreign_races_payload_asks_for_the_field_of_each_race():
+    task = _foreign_races_task('2026-05-30', 'SV')
+    assert task.endpointType == 'heppa_foreign_races'
+    assert task.url == '/race/2026-05-30/SV/races'
+    assert task.stage == HEPPA_FOREIGN_RACES
+    children = expand(task, [{'race': {'startNumber': '3'}},
+                             {'race': {'startNumber': '11'}}])
+    assert [c.endpointType for c in children] == ['heppa_foreign_start'] * 2
+    assert [c.entityId for c in children] == ['2026-05-30/SV/3', '2026-05-30/SV/11']
+    assert children[0].url == '/race/2026-05-30/SV/start/3'
+    assert children[0].stage == HEPPA_FOREIGN_START
+
+
+def test_a_foreign_meeting_keeps_the_gaps_in_its_race_numbering():
+    """Only the races a Finnish horse ran in come back, so Solvalla 2026-05-30
+    is races 1-5, 7, 11 and 31. Counting them instead of reading them would ask
+    for races 6, 8, 9 and 10 and miss 11 and 31 entirely."""
+    task = _foreign_races_task('2026-05-30', 'SV')
+    payload = [{'race': {'startNumber': n}} for n in ('1', '5', '7', '11', '31')]
+    assert [c.entityId.rsplit('/', 1)[1] for c in expand(task, payload)] == [
+        '1', '5', '7', '11', '31']
+
+
+def test_the_foreign_raw_zone_is_a_directory_of_its_own():
+    """The track codes are disjoint from the Finnish ones by construction, but
+    one raw path answerable by two endpoint types only bites after a track
+    changes category, and the prefix costs nothing."""
+    home = expand(Task('heppa_races', '2026-05-30/SV', 'u', 'p', '2026-05-30', None,
+                       HEPPA_RACES), [{'race': {'startNumber': '3'}}])[0]
+    abroad = expand(_foreign_races_task('2026-05-30', 'SV'),
+                    [{'race': {'startNumber': '3'}}])[0]
+    assert home.rawPath == '2026-05-30/heppa_SV/start_3.json.gz'
+    assert abroad.rawPath == '2026-05-30/heppa_foreign_SV/start_3.json.gz'
+
+
+def test_a_foreign_field_is_a_leaf():
+    task = Task('heppa_foreign_start', '2026-05-30/SV/3', 'u', 'p', '2026-05-30',
+                None, HEPPA_FOREIGN_START)
+    assert expand(task, [{'programNumber': '0', 'placing': '4'}]) == []
+
+
+@pytest.fixture
+def archive():
+    conn = duckdb.connect(':memory:')
+    archive_db.create(conn)
+    return conn
+
+
+def prev_start(track_code, meet_date='2026-05-30'):
+    row = [None] * archive_db.INSERT_PREVSTART.count('?')
+    row[1], row[2], row[4], row[6] = 'boomer|2015', meet_date, track_code, 1
+    return tuple(row)
+
+
+def heppa_event(track_code, meet_date='2026-08-08'):
+    row = [None] * archive_db.INSERT_HEPPA_EVENT.count('?')
+    row[0], row[1] = meet_date, track_code
+    return tuple(row)
+
+
+def discovered(conn):
+    return conn.execute(FOREIGN_MEETINGS).fetchall()
+
+
+def test_a_track_the_finnish_listing_never_named_is_a_meeting_abroad(archive):
+    archive_db.ArchiveDb(archive).store_heppa_events([heppa_event('SN')])
+    archive_db.ArchiveDb(archive).store_prevstarts([prev_start('Sv')])
+    assert discovered(archive) == [('2026-05-30', 'SV')]
+
+
+def test_a_finnish_track_is_not_a_meeting_abroad(archive):
+    db = archive_db.ArchiveDb(archive)
+    db.store_heppa_events([heppa_event('SN')])
+    db.store_prevstarts([prev_start('Sn')])
+    assert discovered(archive) == []
+
+
+def test_the_harma_alias_is_folded_before_the_comparison(archive):
+    """Veikkaus writes Harma as both `Hr` and `Hr2`; Heppa has only `HR`. Without
+    the fold `HR2` reads as a track abroad and this crawl would re-fetch 28
+    Finnish meetings it already has."""
+    db = archive_db.ArchiveDb(archive)
+    db.store_heppa_events([heppa_event('HR')])
+    db.store_prevstarts([prev_start('Hr2')])
+    assert discovered(archive) == []
+
+
+def test_a_meeting_already_crawled_is_still_discovered(archive):
+    """The self-poisoning case, and the reason the exclusion reads heppa_event
+    rather than heppa_start. heppa_event comes from the Finnish-only listing so
+    it can never name a track abroad; heppa_start can, the moment this crawl
+    succeeds once — and then the next run would exclude exactly the tracks it had
+    just learnt about and find nothing, looking like a crawl that finished."""
+    db = archive_db.ArchiveDb(archive)
+    db.store_heppa_events([heppa_event('SN')])
+    db.store_prevstarts([prev_start('Sv')])
+    row = [None] * archive_db.INSERT_HEPPA_START.count('?')
+    row[0], row[1], row[2], row[3] = '2026-05-30', 'SV', 3, 0
+    row[5], row[42] = 'H1', False
+    db.store_heppa_starts([tuple(row)])
+    assert discovered(archive) == [('2026-05-30', 'SV')]
+
+
+# --- the registry's own career totals --------------------------------------
+
+
+def test_a_horse_stat_task_is_sharded_and_separate_from_the_registry_record():
+    """Its own endpoint type, because the two are different kinds of fact: the
+    registry record never changes, this is only ever true today."""
+    stat, record = horse_stat_task('8751664442635804005'), horse_task('8751664442635804005')
+    assert stat.url == '/horse/8751664442635804005/stats'
+    assert stat.rawPath == 'heppa/stats/05/8751664442635804005.json.gz'
+    assert stat.stage == HEPPA_HORSE_STAT
+    assert stat.endpointType != record.endpointType
+    assert stat.rawPath != record.rawPath
+
+
+def test_a_horse_stat_payload_is_a_leaf():
+    assert expand(horse_stat_task('H1'), {'id': 'H1', 'stats': []}) == []
+
+
+# --- seeding a meeting by hand ---------------------------------------------
+#
+# prev_start can only name a meeting if Veikkaus re-reported one of its horses,
+# and its foreign rows begin in 2023-09, so the seed file is where knowledge
+# from outside the archive goes. Guessing is cheap — a meeting that never
+# happened, a track that never held one and a real track on a quiet day all
+# answer 200 with `[]` in two bytes — so the parsing is what has to be careful.
+
+
+def seeds(tmp_path, text):
+    path = tmp_path / 'seeds.csv'
+    path.write_text(text, encoding='utf-8')
+    return read_seeds(str(path))
+
+
+def test_a_missing_seed_file_is_no_seeds_rather_than_an_error():
+    """The default path is one nobody has to create."""
+    assert read_seeds('/nowhere/foreign_meetings.csv') == ([], [])
+
+
+def test_comments_and_blank_lines_are_skipped(tmp_path):
+    meetings, complaints = seeds(tmp_path, """
+        # Combat Fighter, Elitloppet weekend
+
+        2026-05-30,SV     # trailing comment
+        """.replace(' ' * 8, ''))
+    assert meetings == [('2026-05-30', 'SV')]
+    assert complaints == []
+
+
+def test_a_track_code_is_upper_cased_and_alias_folded(tmp_path):
+    """`Sv` and `SV` are one meeting, and a seeded `Hr2` becomes the `HR` the
+    caller then recognises as Finnish and skips."""
+    meetings, _ = seeds(tmp_path, '2026-05-30, sv\n2024-03-01,Hr2\n')
+    assert meetings == [('2026-05-30', 'SV'), ('2024-03-01', 'HR')]
+
+
+def test_a_malformed_line_is_reported_and_not_fetched(tmp_path):
+    """The date goes straight into a URL, so `/race/not-a-date/BO/races` would be
+    recorded as a failure of the crawl rather than of the file."""
+    meetings, complaints = seeds(tmp_path, '2026-99-99,BO\njust-one-field\n2026-05-30,\n')
+    assert meetings == []
+    assert len(complaints) == 3
+    assert "'2026-99-99' is not a yyyy-mm-dd date" in complaints[0]
+    assert 'expected `date,trackCode`' in complaints[1]
+
+
+def test_a_duplicate_seed_survives_parsing_and_is_deduped_later(tmp_path):
+    """read_seeds does not dedupe: whether a seed is new depends on the archive,
+    which it has no access to. backfill_foreign folds them together, and the
+    manifest's INSERT OR IGNORE would anyway."""
+    meetings, _ = seeds(tmp_path, '2026-05-30,SV\n2026-05-30,sv\n')
+    assert meetings == [('2026-05-30', 'SV')] * 2
+    assert list(dict.fromkeys(meetings)) == [('2026-05-30', 'SV')]
+
+
+def test_the_finnish_track_set_comes_from_the_listing_not_from_the_starts(archive):
+    """What makes a seeded track foreign or a mistake. Same source as
+    FOREIGN_MEETINGS excludes on, and for the same reason: heppa_event cannot
+    name a track abroad, heppa_start can once the foreign crawl has run."""
+    db = archive_db.ArchiveDb(archive)
+    db.store_heppa_events([heppa_event('SN')])
+    row = [None] * archive_db.INSERT_HEPPA_START.count('?')
+    row[0], row[1], row[2], row[3] = '2026-05-30', 'SV', 3, 0
+    row[5], row[42] = 'H1', False
+    db.store_heppa_starts([tuple(row)])
+    assert [r[0] for r in archive.execute(FINNISH_TRACKS).fetchall()] == ['SN']

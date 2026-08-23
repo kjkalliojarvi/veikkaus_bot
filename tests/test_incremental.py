@@ -7,6 +7,7 @@ manifest's bookkeeping and what ends up in the tables.
 from datetime import date
 import gzip
 import json
+import pathlib
 
 import duckdb
 import pytest
@@ -14,7 +15,9 @@ import pytest
 from veikkaus_bot import parse as P
 from veikkaus_bot.crawler import (Manifest, VEIKKAUS_TYPES, cards_task, dates,
                                   expand)
-from veikkaus_bot.heppa import HEPPA_TYPES, horse_task, results_task
+from veikkaus_bot.heppa import (HEPPA_TYPES, _foreign_races_task, horse_task,
+                                results_task)
+from veikkaus_bot.heppa import expand as heppa_expand
 
 
 MEET = '2026-08-08'
@@ -226,3 +229,74 @@ def test_reset_window_counts_only_what_it_changed():
     m.mark(tasks[0], 'done', 200, None)          # only one is settled
     assert m.reset_window('2026-08-06', '2026-08-08', VEIKKAUS_TYPES) == 1
     assert m.reset_window('2026-08-06', '2026-08-08', VEIKKAUS_TYPES) == 0
+
+
+# --- the starts abroad, through parse_all -----------------------------------
+#
+# The crawl half is pinned in test_heppa.py and the row shape in test_parse.py.
+# What is left is the interaction: a foreign meeting's payloads sitting in the
+# raw zone under their own endpoint types have to reach archive.heppa_start,
+# which is a different code path from the home ones only in how it is discovered.
+
+
+# Bollnas race 4 as Heppa sends it — every runner programNumber '0'.
+ABROAD = [{'date': '2026-08-16', 'trackCode': 'BO', 'startNumber': '4',
+           'programNumber': '0', 'horseId': f'H{n}', 'horseName': f'Abroad {n}',
+           'placing': str(n), 'shortKilometerTime': '15,5', 'distance': '2140',
+           'distanceCode': 'ake', 'lane': str(n), 'finnishTrack': False}
+          for n in (1, 2, 3, 4, 5)]
+
+
+def with_foreign_meeting(archive, field=None):
+    """Add one crawled meeting abroad to the fixture's raw zone."""
+    raw, db = archive
+    conn = duckdb.connect(db)
+    manifest = Manifest(conn)
+    races = _foreign_races_task('2026-08-16', 'BO')
+    listing = [{'race': {'startNumber': '4'}}]
+    manifest.enqueue([races])
+    store(pathlib.Path(raw), races.rawPath, listing)
+    children = heppa_expand(races, listing)
+    manifest.enqueue(children)
+    store(pathlib.Path(raw), children[0].rawPath,
+          ABROAD if field is None else field)
+    for task in (races, *children):
+        manifest.mark(task, 'done', 200, None)
+    conn.close()
+    return raw, db
+
+
+def test_a_crawled_meeting_abroad_reaches_the_start_table(archive):
+    """Five horses, one race, every one of them programNumber 0 — the case the
+    primary key gained horseId for."""
+    counts = run(with_foreign_meeting(archive))
+    assert counts['heppa starts'] == 5
+    raw, db = archive
+    conn = duckdb.connect(db)
+    assert conn.execute("""SELECT count(*), count(DISTINCT horseId)
+        FROM archive.heppa_start WHERE finnishTrack = FALSE""").fetchone() == (5, 5)
+    assert conn.execute("""SELECT count(*) FROM archive.heppa_start
+        WHERE finnishTrack = FALSE AND placement IS NOT NULL""").fetchone()[0] == 5
+    conn.close()
+
+
+def test_a_start_abroad_with_no_registry_id_is_dropped_not_fatal(archive):
+    """horseId is in the primary key, so DuckDB will not hold a NULL there and
+    one such row would fail the whole batch it rides in. It is dropped instead,
+    and its neighbours still land."""
+    field = ABROAD[:2] + [{k: v for k, v in ABROAD[2].items() if k != 'horseId'}]
+    counts = run(with_foreign_meeting(archive, field))
+    assert counts['heppa starts'] == 2
+    raw, db = archive
+    conn = duckdb.connect(db)
+    assert conn.execute(
+        'SELECT count(*) FROM archive.heppa_start').fetchone()[0] == 2
+    conn.close()
+
+
+def test_a_second_parse_does_not_re_add_the_meeting_abroad(archive):
+    """The same idempotence the rest of the pipeline has: the manifest's parsed
+    bookkeeping covers the new endpoint types too."""
+    prepared = with_foreign_meeting(archive)
+    assert run(prepared)['heppa starts'] == 5
+    assert run(prepared)['heppa starts'] == 0

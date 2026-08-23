@@ -50,7 +50,11 @@ def hstart(meet_date, horse_key, *, race_number=1, program_number=1, placement=N
     """
     row = [None] * HEPPA_START_COLUMNS
     row[0], row[1], row[2], row[3] = meet_date, 'TK', race_number, program_number
-    row[4], row[5], row[6] = horse_key, horse_id, horse_name or horse_key
+    # horseId is in the primary key now, so it cannot be NULL; unset, it is
+    # derived from the name so two different horses stay two.
+    row[4] = horse_key
+    row[5] = horse_id or f'id-{horse_name or horse_key}'
+    row[6] = horse_name or horse_key
     row[9], row[11] = start_track, distance_code
     row[12], row[13], row[14] = placing_raw, placement, dq
     row[15], row[16] = gallop, absent
