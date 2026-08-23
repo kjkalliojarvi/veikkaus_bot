@@ -5,7 +5,7 @@
 # own (BO Bollnas, SV Solvalla, TA Taby, SF Solvalla-Farsta, AB Aby, ...) and is
 # upper-cased for you.
 #
-# Say why. prev_start can only name a meeting if Veikkaus re-reported one of its
+# Say why. prev_start can only name a combat meeting if Veikkaus re-reported one of its
 # horses, and its foreign rows start in 2023-09 — so a line here is knowledge
 # that exists nowhere else in the archive, and a line without a note is a fact
 # with no provenance.
@@ -16,3 +16,12 @@
 # quiet day.
 #
 # Nothing is seeded yet.
+2023-02-20, VN
+2023-03-04, VN
+2023-03-22, FR
+2023-04-10, FR
+2023-04-30, FR
+2023-05-19, VN
+2025-08-16, ÅB
+2026-02-07, VN
+2026-02-28, VN
