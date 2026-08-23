@@ -46,7 +46,17 @@ def register_exit_handler(func):
     signal.signal(signal.SIGTERM, func)
 
 
-def sigterm_exit(_sig_func=None):
+def sigterm_exit(_signum=None, _frame=None):
+    """Leave quietly, whether SIGTERM sent us here or the dispatch tail did.
+
+    Both parameters exist because `signal.signal` calls a handler with (signum,
+    frame) and this is also called directly with neither. With only one, a real
+    SIGTERM raised TypeError *inside the handler* — so instead of exiting, the
+    crawl blew up in `time.sleep` and took `db_ops`'s `conn.close()` down with
+    it. Seen on a `heppa-foreign` run killed at 1,500 fetches; nothing was lost,
+    because DuckDB had committed each statement as it went, but the traceback
+    read like a crash rather than a stop.
+    """
     sys.exit(0)
 
 

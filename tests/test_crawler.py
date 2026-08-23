@@ -88,3 +88,20 @@ def test_retry_failed_requeues_only_failures(manifest):
     manifest.mark(bad, 'failed', 503, 'boom')
     assert manifest.retry_failed() == 1
     assert [t.entityId for t in manifest.next_pending(10)] == ['2026-08-08']
+
+
+def test_a_sigterm_leaves_quietly_rather_than_raising_in_the_handler():
+    """`signal.signal` calls a handler with (signum, frame). With a one-argument
+    handler a real SIGTERM raised TypeError inside the handler itself, so a long
+    crawl blew up in `time.sleep` and took its `conn.close()` with it instead of
+    stopping — observed on a heppa-foreign run killed at 1,500 fetches."""
+    import signal as signal_module
+
+    from veikkaus_bot.__main__ import sigterm_exit
+
+    with pytest.raises(SystemExit):
+        sigterm_exit(signal_module.SIGTERM, None)   # as the signal module calls it
+    with pytest.raises(SystemExit):
+        sigterm_exit(None)                          # as the dispatch tail calls it
+    with pytest.raises(SystemExit):
+        sigterm_exit()
