@@ -31,9 +31,23 @@ uv run veikkaus stats [name]                # browse a horse's or trainer's Hepp
                                             #   `t` toggles horse/trainer; `horse` is an alias
 ```
 
+**That block is a reference, not a sequence.** `heppa-horses`, `heppa-foreign` and `heppa-stats` are driven by what the archive already holds rather than by a date window, so each needs a `parse` in front of it — run them on a fresh archive and they tell you so and do nothing. A first build therefore parses twice:
+
+```bash
+uv run veikkaus backfill --from 2021-01-01 --create-db
+uv run veikkaus heppa    --from 2021-01-01
+uv run veikkaus parse                       # the three below read the archive
+uv run veikkaus heppa-horses
+uv run veikkaus heppa-foreign
+uv run veikkaus heppa-stats                 # optional: another 14,050 requests
+uv run veikkaus parse                       # loads what they fetched
+```
+
+The recurring cycle needs only one parse, because those commands read the *previous* run's — see [Keeping the archive up to date](#keeping-the-archive-up-to-date).
+
 Fetching and parsing are deliberately separate. `backfill` only writes gzipped raw responses into `data/raw/` and records every fetch in a manifest table, so it is resumable — kill it and rerun the same command. It crawls newest date first, one request at a time with a ≥1 s delay and exponential backoff. `parse` then reads the raw archive into the `archive.*` tables and can be re-run at any time without re-crawling.
 
-Every command refuses a `--db` path that is not already there, because DuckDB creates a database for whatever path it is handed: a mistyped `--db` would otherwise mint an empty archive and then report zero of everything, which looks exactly like the real one having gone missing. `backfill`, `heppa` and `parse` take `--create-db` for the genuine first run; `status`, `crosscheck` and `heppa-horses` only ever read an archive, so they have no such flag.
+Every command refuses a `--db` path that is not already there, because DuckDB creates a database for whatever path it is handed: a mistyped `--db` would otherwise mint an empty archive and then report zero of everything, which looks exactly like the real one having gone missing. `backfill`, `heppa` and `parse` take `--create-db` for the genuine first run. The other six do not, for two different reasons: `status`, `crosscheck` and `stats` only ever read one, while `heppa-horses`, `heppa-foreign` and `heppa-stats` are driven by what the archive already holds — so none of them could do anything with a database it had just minted.
 
 `--odds` additionally crawls win-pool odds for every race (roughly doubles the request count); without it, final win odds are only known for the paid places.
 
