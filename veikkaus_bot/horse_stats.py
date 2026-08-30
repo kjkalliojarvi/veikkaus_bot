@@ -232,6 +232,23 @@ _LAYOFF_ORDER = """CASE WHEN hs.startInterval IS NULL THEN 4
 # impossible by construction rather than merely absent today.
 _TRACK = 'hs.trackCode'
 
+# The busiest tracks are not the ones a subject is *good* at, so this axis ranks
+# by wins and falls back to starts. Ordering on the `"1st"` output alias rather
+# than repeating the FILTER keeps one definition of what a win is, and DuckDB
+# takes a quoted alias in ORDER BY.
+#
+# **The fallback is the normal case, not an edge case**, which is why it is in
+# the title rather than in a comment: a subject wins at a median of 1 track (a
+# horse or a trainer) or **0** (a driver), and 89.6 % of horses, 80.5 % of
+# trainers and 84.0 % of drivers win at fewer than 5 tracks. So for most
+# subjects most of this table is the starts fallback, and `starts DESC` is what
+# fills it — every track with no win ties at 0 and is then ranked by how often
+# the subject went there.
+#
+# `, track` breaks the remaining ties, so the cut is deterministic rather than
+# whichever equal row DuckDB happened to return.
+_TRACK_ORDER = '"1st" DESC, starts DESC, track'
+
 # The full name, and not either of the two columns that look more like an
 # identity.
 #
@@ -462,19 +479,35 @@ class Axis(NamedTuple):
 # to know which trainers — asking a driver which drivers drove it returns one
 # row equal to Overall.
 #
-# Both are capped, and the cap is **named in the title** because these are the
-# breakdowns that do not sum back to Overall. Top 3 drivers cover 79.6 % of a
-# horse's starts and 75.2 % of a trainer's (median 4 drivers per horse, mean 7.9
-# per trainer); top 3 trainers cover only 52.5 % of a driver's, because a driver
-# has a median of 2 trainers but a maximum of 922 and the busy drivers carry the
-# rows. A cap that did not say so would read as a complete table. The `, name`
-# tiebreak makes the cut deterministic rather than whichever equal row DuckDB
-# happened to return — 970 trainers have a starts tie straddling the third and
-# fourth driver.
-DRIVER_AXIS = Axis('Driver (top 3 by starts)', 'driver', _DRIVER,
-                   'starts DESC, driver', limit=3)
-TRAINER_AXIS = Axis('Trainer (top 3 by starts)', 'trainer', _TRAINER,
-                    'starts DESC, trainer', limit=3)
+# **There is one per subject rather than one per role**, because the axis is a
+# per-`Subject` field and nothing forces the three to agree. They happen to all
+# be 5 today, which is a decision rather than a coincidence: a top 3 cut a
+# majority of every subject. 56.1 % of horses have more than 3 drivers and
+# 38.6 % more than 5 (median 4, mean 5.5, max 35), and the coverage says the
+# same — for a horse 3 drivers cover 79.5 % of the starts and 5 cover 88.8 %;
+# for a trainer 75.1 % and 83.9 % (mean 7.9 drivers per trainer, max 131); for a
+# driver 3 trainers cover only 52.5 % and 5 cover 57.9 %, because a driver has a
+# median of 2 trainers but a maximum of 922 and the busy drivers carry the rows.
+#
+# Those horse figures are grouped on `canonicalKey`, which is what `_HORSE_FROM`
+# joins for — grouping on `horseKey` reads 72.5 %/81.2 % instead, because the
+# 182 horses split across 365 keys are then counted as separate, shorter
+# careers. Measure this the way the axis runs, not the way the table stores.
+#
+# The cap is **named in the title** because these are the breakdowns that do not
+# sum back to Overall, and a cap that did not say so would read as a complete
+# table. The `, name` tiebreak makes the cut deterministic rather than whichever
+# equal row DuckDB happened to return — 970 trainers have a starts tie
+# straddling the third and fourth driver.
+def _partner(role: str, label: str, limit: int) -> Axis:
+    """One subject's counterpart-role axis, capped and titled with its cap."""
+    return Axis(f'{role.capitalize()} (top {limit} by starts)', role, label,
+                f'starts DESC, {role}', limit=limit)
+
+
+HORSE_DRIVERS = _partner('driver', _DRIVER, 5)
+TRAINER_DRIVERS = _partner('driver', _DRIVER, 5)
+DRIVER_TRAINERS = _partner('trainer', _TRAINER, 5)
 
 # crosscheck.REPORTS's shape, one entry per axis, in the order the UI stacks
 # them: the equipment, then the race's shape, then the timeline, then where, and
@@ -507,7 +540,7 @@ COMMON = (
     Axis('Post position (per start type)', 'post', _POST, _POST_ORDER, _POST_ORDER),
     Axis('Days since previous start', 'days since previous', _LAYOFF,
          _LAYOFF_ORDER, _LAYOFF_ORDER),
-    Axis('Track (top 5 by starts)', 'track', _TRACK, 'starts DESC, track', limit=5),
+    Axis('Track (top 5 by wins, then starts)', 'track', _TRACK, _TRACK_ORDER, limit=5),
 )
 
 # Constant across subjects, which is what lets the UI build its panels once and
@@ -543,11 +576,12 @@ class Subject(NamedTuple):
     partner: Axis    # the counterpart role its last axis asks about
 
 
-HORSE = Subject('horse', _HORSE_FROM, START_COLUMNS, SQL_SEARCH_HORSES, DRIVER_AXIS)
+HORSE = Subject('horse', _HORSE_FROM, START_COLUMNS, SQL_SEARCH_HORSES,
+                HORSE_DRIVERS)
 TRAINER = Subject('trainer', _TRAINER_FROM, _WITH_HORSE, SQL_SEARCH_TRAINERS,
-                  DRIVER_AXIS)
+                  TRAINER_DRIVERS)
 DRIVER = Subject('driver', _DRIVER_FROM, _WITH_HORSE, SQL_SEARCH_DRIVERS,
-                 TRAINER_AXIS)
+                 DRIVER_TRAINERS)
 
 # The order `t` cycles through in the UI.
 SUBJECTS = (HORSE, TRAINER, DRIVER)
