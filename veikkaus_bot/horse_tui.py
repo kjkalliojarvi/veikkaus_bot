@@ -69,7 +69,45 @@ LEGEND = ('shoes / cart: K = shod / american sulky · E = barefoot / normal · X
           'absent (withdrawn) starts are excluded throughout')
 
 
-class ClickableTable(DataTable):
+class GuardedTable(DataTable):
+    """A DataTable that survives a click on a panel it has no columns for.
+
+    `DataTable._on_click` treats any click at row -1 as a header click and reads
+    `ordered_columns[column_index]` without checking there are any columns, so a
+    click anywhere in a table that `clear(columns=True)` emptied raises
+    IndexError out of the framework and takes the app down. Its own
+    out-of-bounds guard does not catch it: that guard is skipped whenever
+    `cursor_type` is 'row', which is what every table here uses. Reproduced on
+    textual 8.2.8 by searching for a term that matches nothing and clicking
+    either the hit list or any breakdown panel.
+
+    `prevent_default` rather than a plain return, and that is load-bearing.
+    Textual dispatches an event to the handler in *every* class of the MRO, so
+    `DataTable._on_click` runs after this one and cannot be overridden away —
+    defining `_on_click` here would not replace it, and would also kill this
+    method, since each class contributes `_on_click` *or* `on_click` and the
+    underscore wins. `prevent_default` sets the `_no_default_action` flag that
+    `_get_dispatch_methods` breaks its MRO walk on, so this runs first and the
+    framework's handler never does.
+
+    An empty table has nothing to select in any case, so suppressing the whole
+    default action costs nothing. Every DataTable in this module is one of
+    these, rather than only the two that are known to be cleared today: the
+    guard is free, and a table that gains a `clear(columns=True)` later should
+    not have to rediscover this.
+    """
+
+    def on_click(self, event: events.Click) -> None:
+        if not self.columns:
+            event.prevent_default()
+            return
+        self._clicked(event)
+
+    def _clicked(self, event: events.Click) -> None:
+        """What a click on a table that has columns means. Nothing, by default."""
+
+
+class ClickableTable(GuardedTable):
     """A breakdown table that opens the starts behind the row you click.
 
     A subclass, and both halves of that are forced. `DataTable._on_click` calls
@@ -109,7 +147,7 @@ class ClickableTable(DataTable):
         super().__init__(id=id, cursor_type='row')
         self.axis = axis
 
-    def on_click(self, event: events.Click) -> None:
+    def _clicked(self, event: events.Click) -> None:
         self._open(event.style.meta.get('row', -1))
 
     def action_open_bucket(self) -> None:
@@ -150,7 +188,7 @@ class StartsScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield DataTable(id='starts', cursor_type='row')
+            yield GuardedTable(id='starts', cursor_type='row')
 
     def on_mount(self) -> None:
         box = self.query_one(Vertical)
@@ -205,7 +243,7 @@ class StatsApp(App):
             with Vertical(id='hits-pane'):
                 yield Input(value=self.prefill,
                             placeholder=f'{self.subject.name} name…', id='search')
-                yield DataTable(id='hits', cursor_type='row')
+                yield GuardedTable(id='hits', cursor_type='row')
             with VerticalScroll(id='stats-pane'):
                 yield Static(HINT.format(self.subject.name), id='subject')
                 # Built from the opening subject's axes, and never rebuilt:
