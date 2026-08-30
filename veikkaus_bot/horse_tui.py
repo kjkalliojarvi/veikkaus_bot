@@ -1,15 +1,16 @@
-"""`veikkaus stats` — browse one horse's or one trainer's registry starts.
+"""`veikkaus stats` — browse one horse's, trainer's or driver's registry starts.
 
 A reader over `archive.heppa_start`: search on the left, and the right pane
-counts the starts and the first three placings seven ways — overall, by shoe
-combination, by cart, by distance class, by start type, by the gap since the
-previous start, and by driver. All the SQL, and the reasoning behind it, is in
+counts the starts, the first three placings, the disqualifications and the
+gallops nine ways — overall, by shoe combination, by cart, by distance class, by
+start type, by post position, by the gap since the previous start, by track, and
+by the counterpart role. All the SQL, and the reasoning behind it, is in
 `horse_stats`; this module is the widgets and nothing else.
 
-**Which subject is being counted is app state, not a second app.** `t` switches
-between horses and trainers; the widget tree does not change, because both
-subjects answer the same seven axes and `horse_stats.Subject` is the only thing
-that differs. See `horse_stats.Subject`.
+**Which subject is being counted is app state, not a third app.** `t` cycles
+horse → trainer → driver; the widget tree does not change, because
+`horse_stats.breakdowns` is always `horse_stats.AXIS_COUNT` long and only the
+last panel's title differs. See `horse_stats.Subject`.
 
 Read-only, on a connection opened per query rather than per session, so a
 browsing session cannot hold the archive against a concurrent `parse`. See
@@ -43,18 +44,70 @@ GAP = ' '
 # The shoe and cart codes are Heppa's, kept verbatim through the pipeline, so
 # the vocabulary is glossed once here rather than translated in two tables.
 #
+# The post line is the one a reader is most likely to misread without it: the
+# axis is namespaced by start type because the inside is worth opposite things
+# off an auto and off a volt.
+#
+# The dq line exists because the column sits beside `gallop` and the two are
+# not the same kind of fact — dq never overlaps the placings and gallop always
+# can, which is what the blank spacer column in front of `gallop` is saying.
+#
 # The layoff line is the one caveat that changes meaning with the subject: the
-# gap is always the horse's own, so on a trainer it answers 'how do this
-# trainer's horses go off a break' and its unknown bucket is one row per horse
+# gap is always the horse's own, so on a trainer or a driver it answers 'how do
+# their horses go off a break' and its unknown bucket is one row per horse
 # rather than one row. See `horse_stats._LAYOFF`.
 LEGEND = ('shoes / cart: K = shod / american sulky · E = barefoot / normal · X = not reported\n'
           'distance: ly < ke < kp < pi, short to long — the start type is the `a` prefix of the '
           'same code\n'
-          'days since previous start is the horse\'s own gap, whoever trained it\n'
+          'post position is counted per start type: off an auto the inside is a shorter trip, '
+          'off a volt it is traffic — `unknown` is a post the programme did not report\n'
+          'dq counts the starts carrying a disqualification code (hpl, hll, k, hlo…), which is '
+          'never a placed start; gallop overlaps the placings, because a horse can gallop and '
+          'still win\n'
+          'track is the registry code, as in the start list\n'
+          'days since previous start is the horse\'s own gap, whoever drove or trained it\n'
           'absent (withdrawn) starts are excluded throughout')
 
 
-class ClickableTable(DataTable):
+class GuardedTable(DataTable):
+    """A DataTable that survives a click on a panel it has no columns for.
+
+    `DataTable._on_click` treats any click at row -1 as a header click and reads
+    `ordered_columns[column_index]` without checking there are any columns, so a
+    click anywhere in a table that `clear(columns=True)` emptied raises
+    IndexError out of the framework and takes the app down. Its own
+    out-of-bounds guard does not catch it: that guard is skipped whenever
+    `cursor_type` is 'row', which is what every table here uses. Reproduced on
+    textual 8.2.8 by searching for a term that matches nothing and clicking
+    either the hit list or any breakdown panel.
+
+    `prevent_default` rather than a plain return, and that is load-bearing.
+    Textual dispatches an event to the handler in *every* class of the MRO, so
+    `DataTable._on_click` runs after this one and cannot be overridden away —
+    defining `_on_click` here would not replace it, and would also kill this
+    method, since each class contributes `_on_click` *or* `on_click` and the
+    underscore wins. `prevent_default` sets the `_no_default_action` flag that
+    `_get_dispatch_methods` breaks its MRO walk on, so this runs first and the
+    framework's handler never does.
+
+    An empty table has nothing to select in any case, so suppressing the whole
+    default action costs nothing. Every DataTable in this module is one of
+    these, rather than only the two that are known to be cleared today: the
+    guard is free, and a table that gains a `clear(columns=True)` later should
+    not have to rediscover this.
+    """
+
+    def on_click(self, event: events.Click) -> None:
+        if not self.columns:
+            event.prevent_default()
+            return
+        self._clicked(event)
+
+    def _clicked(self, event: events.Click) -> None:
+        """What a click on a table that has columns means. Nothing, by default."""
+
+
+class ClickableTable(GuardedTable):
     """A breakdown table that opens the starts behind the row you click.
 
     A subclass, and both halves of that are forced. `DataTable._on_click` calls
@@ -74,6 +127,10 @@ class ClickableTable(DataTable):
     the same reason: this binding replaces DataTable's own `enter`, since
     bindings merge with the most-derived class winning per key, leaving exactly
     one path per input method.
+
+    `axis` is reassigned rather than fixed at construction, because cycling the
+    subject swaps the last panel's axis under a widget that stays put. See
+    `StatsApp.show_subject` and `StatsApp._retitle`.
     """
 
     BINDINGS = [Binding('enter', 'open_bucket', 'Show starts')]
@@ -90,7 +147,7 @@ class ClickableTable(DataTable):
         super().__init__(id=id, cursor_type='row')
         self.axis = axis
 
-    def on_click(self, event: events.Click) -> None:
+    def _clicked(self, event: events.Click) -> None:
         self._open(event.style.meta.get('row', -1))
 
     def action_open_bucket(self) -> None:
@@ -131,7 +188,7 @@ class StartsScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield DataTable(id='starts', cursor_type='row')
+            yield GuardedTable(id='starts', cursor_type='row')
 
     def on_mount(self) -> None:
         box = self.query_one(Vertical)
@@ -139,14 +196,14 @@ class StartsScreen(ModalScreen[None]):
         box.border_subtitle = 'escape: close'
         table = self.query_one('#starts', DataTable)
         table.add_columns(*self.columns)
-        # add_rows, not a row at a time: Overall on the busiest trainer is 3,701
+        # add_rows, not a row at a time: Overall on the busiest driver is 9,256
         # starts over eleven columns. Nothing here needs row keys — a start list
         # is the end of the drill-down, not something to click through.
         table.add_rows([[_cell(v) for v in row] for row in self.rows])
 
 
 class StatsApp(App):
-    """Search a horse or a trainer, count its Heppa starts."""
+    """Search a horse, a trainer or a driver, count its Heppa starts."""
 
     CSS = """
     #body { height: 1fr; }
@@ -163,7 +220,7 @@ class StatsApp(App):
     BINDINGS = [
         ('/', 'search', 'Search'),
         ('escape', 'search', 'Search'),
-        ('t', 'toggle_subject', 'Horse/trainer'),
+        ('t', 'cycle_subject', 'Horse/trainer/driver'),
         ('q', 'quit', 'Quit'),
     ]
 
@@ -186,11 +243,15 @@ class StatsApp(App):
             with Vertical(id='hits-pane'):
                 yield Input(value=self.prefill,
                             placeholder=f'{self.subject.name} name…', id='search')
-                yield DataTable(id='hits', cursor_type='row')
+                yield GuardedTable(id='hits', cursor_type='row')
             with VerticalScroll(id='stats-pane'):
                 yield Static(HINT.format(self.subject.name), id='subject')
-                for i, axis in enumerate(horse_stats.BREAKDOWNS):
-                    yield Label(axis.title, classes='bd-title')
+                # Built from the opening subject's axes, and never rebuilt:
+                # every subject has horse_stats.AXIS_COUNT of them, so a cycle
+                # retitles the last panel rather than changing the tree. See
+                # `show_subject`.
+                for i, axis in enumerate(horse_stats.breakdowns(self.subject)):
+                    yield Label(axis.title, classes='bd-title', id=f'bt{i}')
                     yield ClickableTable(axis, id=f'bd{i}')
                 yield Static(LEGEND, id='legend')
         yield Footer()
@@ -213,16 +274,16 @@ class StatsApp(App):
         search.clear()
         search.focus()
 
-    def action_toggle_subject(self) -> None:
-        """Swap horses for trainers, and re-run the term in the new subject.
+    def action_cycle_subject(self) -> None:
+        """Move to the next subject, and re-run the term in it.
 
         Re-running rather than clearing is what makes `veikkaus stats
         'koivunen'` work: it reports no horse, and one keypress turns that into
-        the three trainers. A term that matches nothing in the new subject says
-        so, which is an answer too.
+        the three trainers, a second into the four drivers. A term that matches
+        nothing in the new subject says so, which is an answer too.
         """
-        self.subject = (horse_stats.TRAINER if self.subject is horse_stats.HORSE
-                        else horse_stats.HORSE)
+        nxt = (horse_stats.SUBJECTS.index(self.subject) + 1) % len(horse_stats.SUBJECTS)
+        self.subject = horse_stats.SUBJECTS[nxt]
         self.key = self.label = None
         self.labels = {}
         self.sub_title = f'{self.subject.name} · {self.db}'
@@ -233,6 +294,7 @@ class StatsApp(App):
         else:
             self.query_one('#hits', DataTable).clear(columns=True)
             self._message(HINT.format(self.subject.name))
+            self._retitle()
             search.focus()
 
     @on(Input.Submitted, '#search')
@@ -255,11 +317,20 @@ class StatsApp(App):
         names, rows = hits
         if not rows:
             self._message(f'no {self.subject.name} matching {term!r}')
+            self._retitle()
+            # Focus leaves the search box even with nothing to show, because an
+            # Input swallows every printable key — so `t` typed a 't' into the
+            # term instead of cycling the subject, and the empty result was the
+            # one state where that mattered most. 'No horse called koivunen' is
+            # precisely when the next keypress is meant to be `t`. `/` and
+            # escape come back here, as they do from a hit list.
+            table.focus()
             return
-        # The last column is the identity — a canonicalKey or a trainerId. It is
-        # the row's identity, not something to read, so it becomes the row key
-        # rather than a column, and the first column is what to display for it.
-        # A trainerId is 19 digits, so that pairing is not optional here.
+        # The last column is the identity — a canonicalKey, a trainerId or a
+        # driverId. It is the row's identity, not something to read, so it
+        # becomes the row key rather than a column, and the first column is what
+        # to display for it. A trainerId is 19 digits, so that pairing is not
+        # optional here.
         self.labels = {row[-1]: _cell(row[0]) for row in rows}
         table.add_columns(*names[:-1])
         for row in rows:
@@ -270,19 +341,25 @@ class StatsApp(App):
         table.focus()
 
     def show_subject(self, key: str, label: str) -> None:
-        """Refresh the seven breakdown tables for one horse or trainer.
+        """Refresh the nine breakdown tables for one horse, trainer or driver.
 
         Each breakdown runs on its own inside one connection, so a column an
         older archive does not have costs that one panel rather than the whole
         screen — a read-only reader cannot migrate the archive, by design, and
-        six sevenths of an answer beats none.
+        eight ninths of an answer beats none.
+
+        The panels are also rebound to the current subject's axes here rather
+        than in the cycle handler, because this runs on every path that changes
+        what is on screen and the cycle handler does not.
         """
         self.key, self.label = key, label
         try:
             with db_read(self.db) as conn:
                 heading, failed = key, []
-                for i, axis in enumerate(horse_stats.BREAKDOWNS):
-                    table = self.query_one(f'#bd{i}', DataTable)
+                for i, axis in enumerate(horse_stats.breakdowns(self.subject)):
+                    self.query_one(f'#bt{i}', Label).update(axis.title)
+                    table = self.query_one(f'#bd{i}', ClickableTable)
+                    table.axis = axis
                     table.clear(columns=True)
                     try:
                         names, rows = horse_stats.fetch(
@@ -340,22 +417,35 @@ class StatsApp(App):
     def _message(self, text: str) -> None:
         """Every message and empty state goes in one place."""
         self.query_one('#subject', Static).update(text)
-        for i in range(len(horse_stats.BREAKDOWNS)):
+        for i in range(horse_stats.AXIS_COUNT):
             self.query_one(f'#bd{i}', DataTable).clear(columns=True)
+
+    def _retitle(self) -> None:
+        """Point the empty panels at the current subject's axes.
+
+        `show_subject` does this as it fills them, which covers every path that
+        puts something on screen. This covers the two that do not: a cycle with
+        an empty search box, and a term that matches nothing.
+        """
+        for i, axis in enumerate(horse_stats.breakdowns(self.subject)):
+            self.query_one(f'#bt{i}', Label).update(axis.title)
+            self.query_one(f'#bd{i}', ClickableTable).axis = axis
 
 
 def _heading(label: str, key: str, overall) -> str:
     """`name · identity — N starts`, or the honest 'no starts'.
 
     Both halves earn their place. The name is what you searched for, and a
-    trainer's identity is 19 digits and unreadable; the identity is what every
-    other tool in this repo speaks — a canonicalKey is all over crosscheck
-    output — so dropping it would mean retyping what is already on screen.
+    trainer's or driver's identity is 19 digits and unreadable; the identity is
+    what every other tool in this repo speaks — a canonicalKey is all over
+    crosscheck output — so dropping it would mean retyping what is already on
+    screen.
 
     'No starts' is not an edge case worth hiding: 5,419 of the archive's 17,099
     horses have no `heppa_start` row at all, so "found it, it has nothing here"
-    has to read as an answer rather than as a blank screen. A trainer cannot be
-    in that state, existing only as a start row, but the branch costs nothing.
+    has to read as an answer rather than as a blank screen. A trainer or a
+    driver cannot be in that state, existing only as a start row, but the branch
+    costs nothing.
     """
     starts = overall[0][0] if overall else 0
     who = f'{label} · {key}' if label and label != key else key
@@ -371,6 +461,12 @@ def _spaced(values, filler: str = '') -> list:
     placings rather than adding to them — a horse can gallop and still win. A
     blank column says so at a glance, which beats a caption explaining that
     `1st` and `gallop` can count the same start.
+
+    The `dq` column in front of it is deliberately *not* inside the gap: a
+    disqualified start is never a placed one, so it competes with the placings
+    rather than overlapping them. sjoden spaces its last two because it appends
+    `dq` after `gallop`; here the order is the other way round, and so is this.
+    See `horse_stats.PLACINGS`.
     """
     return [*values[:-1], filler, values[-1]]
 
@@ -386,10 +482,11 @@ def _cell(value) -> str:
 
 
 def stats_tui(args):
-    """CLI handler: browse a horse's or a trainer's registry starts in a TUI.
+    """CLI handler: browse a horse's, trainer's or driver's registry starts.
 
-    Always opens on horses; `t` switches. There is no --trainer flag because
-    the toggle re-runs the term, so one keypress does the same job.
+    Always opens on horses; `t` cycles horse → trainer → driver. There are no
+    --trainer/--driver flags because the cycle re-runs the term, so one keypress
+    does the same job.
     """
     StatsApp(args.db, args.name).run()
 
