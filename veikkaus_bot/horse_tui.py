@@ -280,6 +280,13 @@ class StatsApp(App):
         if not rows:
             self._message(f'no {self.subject.name} matching {term!r}')
             self._retitle()
+            # Focus leaves the search box even with nothing to show, because an
+            # Input swallows every printable key — so `t` typed a 't' into the
+            # term instead of cycling the subject, and the empty result was the
+            # one state where that mattered most. 'No horse called koivunen' is
+            # precisely when the next keypress is meant to be `t`. `/` and
+            # escape come back here, as they do from a hit list.
+            table.focus()
             return
         # The last column is the identity — a canonicalKey, a trainerId or a
         # driverId. It is the row's identity, not something to read, so it
