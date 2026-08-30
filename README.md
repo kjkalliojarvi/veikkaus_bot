@@ -26,9 +26,9 @@ uv run veikkaus heppa-stats                 # the registry's career totals, to m
 uv run veikkaus status                      # how far both got
 uv run veikkaus parse                       # raw/ -> archive.* tables
 uv run veikkaus crosscheck                  # do the two sources agree?
-uv run veikkaus stats [name]                # browse a horse's or trainer's Heppa starts (TUI)
+uv run veikkaus stats [name]                # browse a horse's, trainer's or driver's Heppa starts (TUI)
                                             #   click a stats row for the starts behind it
-                                            #   `t` toggles horse/trainer; `horse` is an alias
+                                            #   `t` cycles horse/trainer/driver; `horse` is an alias
 ```
 
 **That block is a reference, not a sequence.** `heppa-horses`, `heppa-foreign` and `heppa-stats` are driven by what the archive already holds rather than by a date window, so each needs a `parse` in front of it — run them on a fresh archive and they tell you so and do nothing. A first build therefore parses twice:

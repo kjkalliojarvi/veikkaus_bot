@@ -221,7 +221,7 @@ def veikkaus():
     # only counted horses, and it is in muscle memory and in the docs.
     parser_stats = subparser.add_parser(
         'stats', aliases=['horse'],
-        help="Browse a horse's or a trainer's registry starts in a terminal UI")
+        help="Browse a horse's, trainer's or driver's registry starts in a terminal UI")
     parser_stats.add_argument('name', nargs='?', default=None,
                               help='Prefill the search box with this name')
     parser_stats.add_argument('--db', default=DEFAULT_DB,

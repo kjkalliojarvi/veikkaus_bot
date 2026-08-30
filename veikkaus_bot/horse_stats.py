@@ -1,5 +1,5 @@
-"""One horse's — or one trainer's — registry starts, counted every way the TUI
-shows them.
+"""One horse's, one trainer's or one driver's registry starts, counted every way
+the TUI shows them.
 
 The query layer behind `veikkaus stats`. Read-only, and deliberately free of
 any UI import: every function takes an open connection, so the SQL is testable
@@ -26,16 +26,17 @@ written once: the aggregate selects it, and the drill-down behind a clicked
 bucket compares against it. See `Axis`.
 
 **Whose starts are being counted is a `Subject`, and nothing else varies.** A
-horse and a trainer are the same seven questions asked of the same table, so a
-second module would be a second definition of what '<= 14 days' means, free to
-drift — the trap `crosscheck.py` avoids by building every report on
-`archive_db.HEPPA_START_BRIDGE` rather than a hand-copied lookalike. See
-`Subject`.
+horse, a trainer and a driver are the same nine questions asked of the same
+table, so a second module per subject would be a second definition of what
+'<= 14 days' means, free to drift — the trap `crosscheck.py` avoids by building
+every report on `archive_db.HEPPA_START_BRIDGE` rather than a hand-copied
+lookalike. See `Subject`.
 
 Run it directly to iterate on the SQL without starting Textual:
 
     uv run python -m veikkaus_bot.horse_stats 'com milton'
     uv run python -m veikkaus_bot.horse_stats 'koivunen' trainer
+    uv run python -m veikkaus_bot.horse_stats 'raitala' driver
 """
 from typing import NamedTuple
 
@@ -50,17 +51,29 @@ NOT_ABSENT = 'NOT coalesce(hs.absent, false)'
 
 # Quoted identifiers so '1st'/'2nd'/'3rd' survive as table headers.
 #
-# `gallop` is orthogonal to the placings and does not subtract from them: a
-# horse can gallop and still win, and 48,078 of the archive's 51,730 galloping
-# starts were placed at all, 2,832 of them first. So this column overlaps the
-# three before it by design — it is 'how often did it break', not a fourth
-# outcome. NULL only ever occurs on absent rows, which are filtered out anyway,
-# and FILTER reads a NULL as false regardless.
-PLACINGS = """count(*)                                 AS starts,
-           count(*) FILTER (WHERE hs.placement = 1) AS "1st",
-           count(*) FILTER (WHERE hs.placement = 2) AS "2nd",
-           count(*) FILTER (WHERE hs.placement = 3) AS "3rd",
-           count(*) FILTER (WHERE hs.gallop)        AS gallop"""
+# **`dq` sits with the placings and `gallop` sits alone behind them, and that
+# ordering is the whole point of the layout.** A disqualification is a fourth
+# outcome: `disqualifiedCode` is non-NULL on 36,513 of the 298,492 non-absent
+# rows (hpl 16,696, hll 11,174, k 4,007, hlo 3,543, and six rarer codes), and
+# **not one of them carries a placement** — the two are disjoint by data as well
+# as by meaning. `gallop` is not: a horse can gallop and still win, 48,078 of
+# the 51,730 galloping starts were placed at all and 2,832 of them first, and
+# 3,765 rows are both a gallop and a disqualification. The TUI's blank spacer
+# column means 'this one overlaps the placings', so it goes in front of `gallop`
+# and nothing else — see `horse_tui._spaced`. sjoden appends its `dq` after
+# `gallop` and spaces the last two; copying that here would say the opposite of
+# what is true.
+#
+# `IS NOT NULL` rather than a nullif or a length test: zero non-absent rows hold
+# an empty code, which is data rather than construction, but a code is a code.
+# NULL on `gallop` only ever occurs on absent rows, which are filtered out
+# anyway, and FILTER reads a NULL as false regardless.
+PLACINGS = """count(*)                                                 AS starts,
+           count(*) FILTER (WHERE hs.placement = 1)                AS "1st",
+           count(*) FILTER (WHERE hs.placement = 2)                AS "2nd",
+           count(*) FILTER (WHERE hs.placement = 3)                AS "3rd",
+           count(*) FILTER (WHERE hs.disqualifiedCode IS NOT NULL) AS dq,
+           count(*) FILTER (WHERE hs.gallop)                       AS gallop"""
 
 # canonicalKey identifies, horseKey joins. The two agree on heppa_start today —
 # RECOMPUTE_HEPPA_START_HORSEKEY and RECOMPUTE_HORSE_IDENTITY both write
@@ -85,6 +98,164 @@ _TRAINER_FROM = f"""
     FROM archive.heppa_start hs
     WHERE hs.trainerId = ? AND {NOT_ABSENT}
 """
+
+# A driver is identified by `driverId`, never by either name column. It is
+# non-NULL on all 298,492 non-absent rows and carries 3,196 distinct ids, and
+# **zero of them carry two different first+last names** — while 6 full names are
+# shared by two ids, so grouping on the name would report one career for two.
+# `driverName` is worse still: it is the short form ('S Raitala') and 129 ids
+# carry more than one.
+#
+# No join, for the reason on _TRAINER_FROM: joining archive.horse would cost the
+# 27,430 non-absent rows RECOMPUTE_HEPPA_START_HORSEKEY never reached — starts
+# the driver really had — and `hs.horseName` is on the row.
+_DRIVER_FROM = f"""
+    FROM archive.heppa_start hs
+    WHERE hs.driverId = ? AND {NOT_ABSENT}
+"""
+
+# The distance class, with the auto-start prefix taken off: the eight codes
+# Heppa writes are four classes and an `a` for the start type — 'ke'/'ake',
+# 'ly'/'aly', 'kp'/'akp', 'pi'/'api' — and the start type is an axis of its own
+# below, so keeping the prefix here would split every class in two and ask the
+# same question twice. substr() rather than ltrim(code, 'a'), which would eat
+# every leading 'a' of a code that ever starts with two.
+#
+# NULL becomes its own 'unknown' row rather than disappearing: every breakdown
+# has to sum back to the overall start count, and a bucket that cannot be
+# clicked through to its starts is worse than an ugly label.
+_CLASS = """CASE WHEN hs.distanceCode LIKE 'a%' THEN substr(hs.distanceCode, 2)
+                     ELSE hs.distanceCode END"""
+
+# Ordered short to long, because the label sorts wrong: alphabetically these
+# come out ke, kp, ly, pi. Observed spans, non-absent: ly 600-1,980 m,
+# ke 2,000-2,480 m, kp 2,500-2,860 m, pi 3,020-4,240 m. A code outside the four
+# sorts last rather than being dropped.
+_CLASS_ORDER = f"""CASE {_CLASS} WHEN 'ly' THEN 0 WHEN 'ke' THEN 1
+                                     WHEN 'kp' THEN 2 WHEN 'pi' THEN 3
+                                     ELSE 4 END"""
+
+# Auto start against volt, off the parsed column rather than re-derived from the
+# code above — that column is what analysis joins on, so this counts the thing
+# it would count. On a Heppa row the two are the same fact read twice
+# (`parse_heppa_auto_start` reads the same `a` prefix), which is why this table
+# always mirrors the a/bare split of the distance table exactly. It earns its
+# place anyway: start type is the axis, and it is the one that survives if a
+# later source fills `autoStart` some other way.
+#
+# NULL is 'unknown' and stays visible: `parse_heppa_auto_start` leaves it NULL
+# for a code it does not recognise rather than defaulting to volt.
+_AUTO = """CASE hs.autoStart WHEN true THEN 'auto' WHEN false THEN 'volt'
+                                 ELSE 'unknown' END"""
+
+# The post, prefixed by the start type, because the bare number is two different
+# questions averaged together.
+#
+# Off an auto the field lines up abreast and the inside is a shorter trip; off a
+# volt they turn into the race from a standing tier, where the inside is
+# traffic. This archive says so plainly — win rate by post, non-absent starts:
+# auto peaks at post 4-5 (13.0 %, 12.9 %), while volt peaks at post 1 (15.4 %)
+# and falls monotonically to 8.4 % by post 4. A merged bucket 4 therefore
+# reports a figure describing neither. Merging also hides the ranges: post 12
+# has 6,479 auto starts against 386 volt ones.
+#
+# **startTrack = 0 is 'not reported', not a post**, and it collapses into one
+# 'unknown' bucket rather than becoming 'auto 0'/'volt 0' — which would be two
+# rows saying the same thing, and would sort ahead of post 1 as if it were
+# further inside. It is 87 non-absent rows, every one of them finnishTrack =
+# false: a programme abroad that does not name the post. The column is NULL on
+# **zero** rows of the whole table, so the coalesce is construction rather than
+# data — but `||` propagates a NULL, and a NULL label is a bucket that cannot be
+# opened, so the guard fails toward a visible row. See `Axis`.
+#
+# cast to text so the label is a string like every other axis: `Axis.starts`
+# compares it against a `?` bound from a table cell, which is text by the time
+# it comes back out of the UI.
+_POST = f"""CASE WHEN coalesce(hs.startTrack, 0) = 0 THEN 'unknown'
+                     ELSE {_AUTO} || ' ' || cast(hs.startTrack AS varchar) END"""
+
+# Grouped by start type, then numerically within it, or the labels sort 'auto
+# 1', 'auto 10', 'auto 11', …, 'auto 2'. One key does both: the type's rank
+# times a hundred plus the post, which is safe because the posts run 1-16 and no
+# field reaches 100. The unknowns sort last rather than first, which a NULL
+# would do in DuckDB's default ordering. Injective over the labels, so the
+# ordering is total without a tiebreak.
+_POST_ORDER = """CASE WHEN coalesce(hs.startTrack, 0) = 0 THEN 9999
+                          ELSE (CASE hs.autoStart WHEN true THEN 0
+                                                  WHEN false THEN 1
+                                                  ELSE 2 END) * 100
+                               + hs.startTrack END"""
+
+# The layoff buckets sort by length, so the label cannot be the sort key: as
+# text they come out '15-30', '31-60', '<= 14', '> 60'. A second CASE gives the
+# numeric key, and DuckDB takes it in GROUP BY and ORDER BY without it reaching
+# the SELECT list, so the sort key never shows up in the table.
+#
+# NULL is its own bucket, and *for a horse* it means exactly one thing: `absent`
+# is filtered above, and the 27,430 rows RECOMPUTE_HEPPA_START_HORSEKEY never
+# reached have no horseKey to join on at all. What is left is a start with no
+# known predecessor across the three start-bearing tables — at most one row per
+# horse. Never `startInterval > 10000` here: that sentinel is prev_start's, and
+# heppa_start says unknown with NULL.
+#
+# **That collapse is conditional on the subject, and the label over-claims for a
+# trainer or a driver.** startInterval is the *horse's* gap whoever trained or
+# drove it, which is a fair question of both, but neither _TRAINER_FROM nor
+# _DRIVER_FROM joins archive.horse, so their NULL bucket mixes each horse's
+# earliest known start with the rows that have no identity at all, and it is no
+# longer at most one row — 38,351 non-absent rows are NULL archive-wide. The
+# string stays as it is because it is right for a horse and two tests pin it;
+# the LEGEND carries the caveat that is true for all three.
+_LAYOFF = """CASE WHEN hs.startInterval IS NULL THEN 'unknown (no earlier start known)'
+                      WHEN hs.startInterval <= 14   THEN '<= 14 days'
+                      WHEN hs.startInterval <= 30   THEN '15-30 days'
+                      WHEN hs.startInterval <= 60   THEN '31-60 days'
+                                                    ELSE '> 60 days' END"""
+
+_LAYOFF_ORDER = """CASE WHEN hs.startInterval IS NULL THEN 4
+                            WHEN hs.startInterval <= 14   THEN 0
+                            WHEN hs.startInterval <= 30   THEN 1
+                            WHEN hs.startInterval <= 60   THEN 2
+                                                          ELSE 3 END"""
+
+# The registry's track code, not a name, and that is a measured decision rather
+# than a shortcut. archive.heppa_start has no name column; archive.heppa_event
+# has one, but a LEFT JOIN on (meetDate, trackCode) leaves 3,648 non-absent
+# starts with a NULL name and resolves only 52 of the 99 codes — the local, pony
+# and foreign meetings have no event row — and an inner join would drop those
+# starts outright, which is the trap _TRAINER_FROM exists to avoid. That column
+# is the organisation's name in any case ('Vermon Ravirata Oy'), not a track's.
+# The code is also what the drill-down's `trk` column shows and what every other
+# tool here speaks, so the bucket and the start list share one vocabulary.
+#
+# No coalesce: trackCode is part of heppa_start's PRIMARY KEY, so a NULL is
+# impossible by construction rather than merely absent today.
+_TRACK = 'hs.trackCode'
+
+# The full name, and not either of the two columns that look more like an
+# identity.
+#
+# `driverName` is the short form ('S Raitala') and it is not reliable: 129 ids
+# carry a second, *different* person's short name on a handful of rows each, so
+# Santtu Raitala's 9,256 starts include one reading 'V Stenman'. Grouping on it
+# would split a driver's row and could cost them a place in the top three below.
+# `driverId` is clean — zero ids carry more than one first+last name — but it is
+# 19 digits, and a bucket label is read.
+#
+# So the label is the full name: non-NULL and never partial on any of the
+# 298,492 non-absent rows, which is data rather than construction, so no
+# coalesce is needed. 3,190 distinct values against 3,196 ids — 6 names belong
+# to two people and merge into one bucket. The drill-down merges identically, so
+# the count a bucket shows is still the count it opens.
+_DRIVER = "hs.driverFirstName || ' ' || hs.driverLastName"
+
+# The trainer's name, for the counterpart axis a driver gets. `trainerName` is
+# already a full name, unlike `driverName`, and is non-NULL on every row; 4,656
+# ids carry 4,620 distinct names on the non-absent rows, so 36 names belong to
+# two people and merge into one bucket — which the drill-down merges
+# identically, so the count a bucket shows is still the count it opens. The
+# 19-digit id is the identity a *subject* is keyed on; a bucket label is read.
+_TRAINER = 'hs.trainerName'
 
 # Two stages, and that is the whole point of this query.
 #
@@ -141,8 +312,8 @@ SQL_SEARCH_HORSES = """
 # filter binds to the id arm alone, and a pasted id lists withdrawn entries.
 #
 # `trainerId = ?` rather than a LIKE on a 19-digit number: pasting an id means
-# that exact id, and it keeps the parameters (term, term, limit) for both
-# subjects, so `search()` needs to know nothing about which one it is running.
+# that exact id, and it keeps the parameters (term, term, limit) for every
+# subject, so `search()` needs to know nothing about which one it is running.
 SQL_SEARCH_TRAINERS = f"""
     SELECT any_value(hs.trainerName)                        AS trainer,
            count(*)                                         AS starts,
@@ -158,88 +329,37 @@ SQL_SEARCH_TRAINERS = f"""
     LIMIT ?
 """
 
-# The distance class, with the auto-start prefix taken off: the eight codes
-# Heppa writes are four classes and an `a` for the start type — 'ke'/'ake',
-# 'ly'/'aly', 'kp'/'akp', 'pi'/'api' — and the start type is an axis of its own
-# below, so keeping the prefix here would split every class in two and ask the
-# same question twice. substr() rather than ltrim(code, 'a'), which would eat
-# every leading 'a' of a code that ever starts with two.
+# The driver search, and it is SQL_SEARCH_TRAINERS's shape line for line: one
+# stage (one driverId is one driver, so there is nothing to canonicalise), no
+# LEFT JOIN arm (a driver exists only as a start row and cannot be 'found it,
+# nothing here'), the same `horses`/`years` disambiguators, the same `= ?` on a
+# 19-digit id, and the same (term, term, limit) parameters, so `search()` still
+# needs to know nothing about which subject it is running.
 #
-# NULL becomes its own 'unknown' row rather than disappearing: every breakdown
-# has to sum back to the overall start count, and a bucket that cannot be
-# clicked through to its starts is worse than an ugly label.
-_CLASS = """CASE WHEN hs.distanceCode LIKE 'a%' THEN substr(hs.distanceCode, 2)
-                     ELSE hs.distanceCode END"""
-
-# Ordered short to long, because the label sorts wrong: alphabetically these
-# come out ke, kp, ly, pi. Observed spans, non-absent: ly 600-1,980 m,
-# ke 2,000-2,480 m, kp 2,500-2,860 m, pi 3,020-4,240 m. A code outside the four
-# sorts last rather than being dropped.
-_CLASS_ORDER = f"""CASE {_CLASS} WHEN 'ly' THEN 0 WHEN 'ke' THEN 1
-                                     WHEN 'kp' THEN 2 WHEN 'pi' THEN 3
-                                     ELSE 4 END"""
-
-# Auto start against volt, off the parsed column rather than re-derived from the
-# code above — that column is what analysis joins on, so this counts the thing
-# it would count. On a Heppa row the two are the same fact read twice
-# (`parse_heppa_auto_start` reads the same `a` prefix), which is why this table
-# always mirrors the a/bare split of the distance table exactly. It earns its
-# place anyway: start type is the axis, and it is the one that survives if a
-# later source fills `autoStart` some other way.
+# **The parentheses around the OR are load-bearing**, as they are there: without
+# them the absent filter binds to the id arm alone and a pasted id lists
+# withdrawn entries.
 #
-# NULL is 'unknown' and stays visible: `parse_heppa_auto_start` leaves it NULL
-# for a code it does not recognise rather than defaulting to volt.
-_AUTO = """CASE hs.autoStart WHEN true THEN 'auto' WHEN false THEN 'volt'
-                                 ELSE 'unknown' END"""
-
-# The layoff buckets sort by length, so the label cannot be the sort key: as
-# text they come out '15-30', '31-60', '<= 14', '> 60'. A second CASE gives the
-# numeric key, and DuckDB takes it in GROUP BY and ORDER BY without it reaching
-# the SELECT list, so the sort key never shows up in the table.
-#
-# NULL is its own bucket, and *for a horse* it means exactly one thing: `absent`
-# is filtered above, and the 27,430 rows RECOMPUTE_HEPPA_START_HORSEKEY never
-# reached have no horseKey to join on at all. What is left is a start with no
-# known predecessor across the three start-bearing tables — at most one row per
-# horse. Never `startInterval > 10000` here: that sentinel is prev_start's, and
-# heppa_start says unknown with NULL.
-#
-# **That collapse is conditional on the subject, and the label over-claims for a
-# trainer.** startInterval is the *horse's* gap whoever trained it, which is a
-# fair trainer question, but _TRAINER_FROM does not join archive.horse, so a
-# trainer's NULL bucket mixes each of its horses' earliest known starts with the
-# rows that have no identity at all, and it is no longer at most one row —
-# 38,351 non-absent rows are NULL archive-wide. The string stays as it is
-# because it is right for a horse and two tests pin it; the LEGEND carries the
-# caveat that is true for both.
-_LAYOFF = """CASE WHEN hs.startInterval IS NULL THEN 'unknown (no earlier start known)'
-                      WHEN hs.startInterval <= 14   THEN '<= 14 days'
-                      WHEN hs.startInterval <= 30   THEN '15-30 days'
-                      WHEN hs.startInterval <= 60   THEN '31-60 days'
-                                                    ELSE '> 60 days' END"""
-
-_LAYOFF_ORDER = """CASE WHEN hs.startInterval IS NULL THEN 4
-                            WHEN hs.startInterval <= 14   THEN 0
-                            WHEN hs.startInterval <= 30   THEN 1
-                            WHEN hs.startInterval <= 60   THEN 2
-                                                          ELSE 3 END"""
-
-# The full name, and not either of the two columns that look more like an
-# identity.
-#
-# `driverName` is the short form ('S Raitala') and it is not reliable: 113 ids
-# carry a second, *different* person's short name on a handful of rows each, so
-# Santtu Raitala's 9,212 starts include one reading 'V Stenman'. Grouping on it
-# would split a driver's row and could cost them a place in the top three below.
-# `driverId` is clean — zero ids carry more than one first+last name — but it is
-# 19 digits, and a bucket label is read.
-#
-# So the label is the full name: non-NULL and never partial on any of the
-# 293,843 non-absent rows, which is data rather than construction, so no
-# coalesce is needed. 3,138 distinct values against 3,143 ids — 5 names belong
-# to two people (557 starts, 0.19 %) and merge into one bucket. The drill-down
-# merges identically, so the count a bucket shows is still the count it opens.
-_DRIVER = "hs.driverFirstName || ' ' || hs.driverLastName"
+# The one difference is which name it matches and displays. `hs.driverName` is
+# the short form and 129 ids carry more than one of them, so a term typed as a
+# surname would miss and a displayed hit would be unstable; the search runs on
+# the concatenated full name, which is what the driver axis already labels its
+# buckets with. Matching the short form *as well* would need a third `?` and
+# would break the parameter contract above.
+SQL_SEARCH_DRIVERS = f"""
+    SELECT any_value({_DRIVER})                             AS driver,
+           count(*)                                         AS starts,
+           count(DISTINCT hs.horseId)                       AS horses,
+           substr(min(hs.meetDate), 1, 4) || '-'
+             || substr(max(hs.meetDate), 1, 4)              AS years,
+           hs.driverId                                      AS driverId
+    FROM archive.heppa_start hs
+    WHERE (lower({_DRIVER}) LIKE '%' || lower(?) || '%' OR hs.driverId = ?)
+      AND {NOT_ABSENT}
+    GROUP BY hs.driverId
+    ORDER BY starts DESC, driver
+    LIMIT ?
+"""
 
 # The individual starts behind a bucket. Compact on purpose — the identity of
 # the start, the conditions it ran under, how it went, and who drove.
@@ -250,13 +370,14 @@ _DRIVER = "hs.driverFirstName || ' ' || hs.driverLastName"
 # placings shows '-'. Neither is a missing value.
 #
 # `lane` is `startTrack`, which archive_db names to match archive.start; it is
-# the post, 1-15, and never NULL. `odds` is `winOdd` scaled out of hundredths,
-# and NULL on the 44,995 non-absent rows of local and pony meetings where there
-# was no betting — blank there is the truth. nullif(0) because 1.00 is the floor
-# of a win odd, so the 64 rows storing 0 are 'not reported' rather than a price
-# of nothing. `prize` is `prizeWon`, this race's money for this horse, in euros
-# and never NULL: 0 is what an unplaced start won, which is a fact rather than a
-# gap, and 128,262 rows say it.
+# the post, 1-16, and never NULL — but 0 where a programme abroad did not report
+# it, which is what the post-position axis buckets as 'unknown'. `odds` is
+# `winOdd` scaled out of hundredths, and NULL on the 44,995 non-absent rows of
+# local and pony meetings where there was no betting — blank there is the truth.
+# nullif(0) because 1.00 is the floor of a win odd, so the 64 rows storing 0 are
+# 'not reported' rather than a price of nothing. `prize` is `prizeWon`, this
+# race's money for this horse, in euros and never NULL: 0 is what an unplaced
+# start won, which is a fact rather than a gap, and 128,262 rows say it.
 #
 # printf rather than round(), which returns a double and so prints 2.6 for a
 # price of 2.60. printf keeps a NULL NULL, so the no-betting rows stay blank.
@@ -267,35 +388,11 @@ START_COLUMNS = """hs.meetDate AS date, hs.trackCode AS trk, hs.raceNumber AS ra
            printf('%.2f', nullif(hs.winOdd, 0) / 100.0) AS odds,
            hs.prizeWon AS prize, hs.driverName AS driver"""
 
-
-class Subject(NamedTuple):
-    """Whose starts a breakdown counts — a horse, or a trainer.
-
-    The `BREAKDOWNS` below say how to group a set of `heppa_start` rows; a
-    Subject says *which* rows, and what a drill-down lists behind one bucket.
-    Nothing else differs: the label expressions, PLACINGS, the orderings and the
-    absent filter are the same questions asked of the same table.
-
-    `frm` is the contract, and it is three things at once. The table is aliased
-    `hs`, because every shared expression above says `hs.`. It takes exactly one
-    `?`, the identity, so `bucket_starts` can build the parameters without
-    knowing the subject. And it *ends* in a WHERE, so `Axis.starts` can hang
-    `AND <label> = ?` off it.
-    """
-
-    name: str        # the noun the UI puts in its prompt and its messages
-    frm: str         # FROM … WHERE <identity> = ? AND NOT absent
-    columns: str     # the drill-down's SELECT list
-    search: str      # (display…, identity last), given (term, term, limit)
-
-
-HORSE = Subject('horse', _HORSE_FROM, START_COLUMNS, SQL_SEARCH_HORSES)
-
-# The horse column the horse view has no use for: a trainer's start list is
-# 'which of mine ran', so it goes first and the ten shared columns follow
-# unchanged. hs.horseName rather than a join, for the reason on _TRAINER_FROM.
-TRAINER = Subject('trainer', _TRAINER_FROM,
-                  f'hs.horseName AS horse, {START_COLUMNS}', SQL_SEARCH_TRAINERS)
+# The horse column the horse view has no use for: a trainer's or a driver's
+# start list is 'which horse ran', so it goes first and the ten shared columns
+# follow unchanged. hs.horseName rather than a join, for the reason on
+# _TRAINER_FROM.
+_WITH_HORSE = f'hs.horseName AS horse, {START_COLUMNS}'
 
 
 class Axis(NamedTuple):
@@ -313,8 +410,9 @@ class Axis(NamedTuple):
     Every label is non-NULL by construction, and that is a requirement rather
     than a nicety: `NULL = ?` is never true, so a NULL label would be a blank
     bucket row that opens an empty list. Hence the `coalesce` around the shoe
-    concatenation, where `||` propagates a NULL, and around `specialCart`. Both
-    are NULL on zero archive rows today, which is data and not construction.
+    concatenation, where `||` propagates a NULL, around `specialCart`, and
+    around `startTrack` in the post label. All three are NULL on zero archive
+    rows today, which is data and not construction.
 
     `Overall` has no label. It groups nothing and filters nothing, so clicking
     it lists every start the subject has.
@@ -322,8 +420,13 @@ class Axis(NamedTuple):
     `limit` caps the **breakdown** and nothing else. `starts` stays uncapped, so
     a bucket that is on screen still opens exactly the count it shows; capping
     both would break the one invariant this class exists to hold. A capped axis
-    therefore does not sum back to the overall start count, which is why the
-    only one that has a limit says so in its title.
+    therefore does not sum back to the overall start count, which is why the two
+    that have a limit say so in their titles.
+
+    It is defined above `Subject` because `Subject.partner` is annotated `Axis`
+    and a NamedTuple evaluates its annotations when the class body runs. The
+    methods here take the forward reference `'Subject'` for the mirror image of
+    the same reason.
     """
 
     title: str
@@ -333,8 +436,8 @@ class Axis(NamedTuple):
     sort: str | None = None      # a numeric sort key, where the label sorts wrong
     limit: int | None = None     # keep only the busiest N buckets
 
-    def breakdown(self, subject: Subject) -> str:
-        """Starts, placings and gallops per bucket."""
+    def breakdown(self, subject: 'Subject') -> str:
+        """Starts, placings, disqualifications and gallops per bucket."""
         if self.label is None:
             return f'SELECT {PLACINGS} {subject.frm}'
         group = f'GROUP BY 1, {self.sort}' if self.sort else 'GROUP BY 1'
@@ -342,35 +445,57 @@ class Axis(NamedTuple):
         return (f'SELECT {self.label} AS "{self.column}", {PLACINGS} '
                 f'{subject.frm} {group} ORDER BY {self.order}{cap}')
 
-    def starts(self, subject: Subject) -> str:
+    def starts(self, subject: 'Subject') -> str:
         """The individual starts behind one bucket, newest first.
 
-        programNumber breaks the ties, because a trainer can have two horses in
-        one race and a two-column order over (date, race) is no longer total. A
-        no-op for a horse, which cannot be in one race twice.
+        programNumber breaks the ties, because a trainer or a driver can have
+        two horses in one race and a two-column order over (date, race) is no
+        longer total. A no-op for a horse, which cannot be in one race twice.
         """
         bucket = '' if self.label is None else f'AND {self.label} = ?'
         return (f'SELECT {subject.columns} {subject.frm} {bucket} '
                 f'ORDER BY hs.meetDate DESC, hs.raceNumber DESC, hs.programNumber')
 
 
-# crosscheck.REPORTS's shape, one entry per axis: the UI builds a labelled table
-# per entry in a loop, so an eighth breakdown is one line here and no widget
-# code. The shoe combinations involving X are kept as they are rather than
-# folded into the majority or into one 'unknown' — the K/E/X codes stay verbatim
-# through the whole pipeline, and X is 'not reported' rather than a third kind
-# of shoeing, so folding it either invents shoeings or hides starts. specialCart
-# is Heppa's americanSulkyKEX (K = yes, E = no, X = not reported) and gets the
-# same treatment, glossed once in the UI legend.
+# The counterpart-role axis, the one breakdown that depends on who is being
+# counted: a horse and a trainer want to know which drivers, and a driver wants
+# to know which trainers — asking a driver which drivers drove it returns one
+# row equal to Overall.
 #
-# Driver is the one capped axis, and the cap is **named in the title** because
-# it is the one breakdown that does not sum back to Overall: the top three cover
-# 79.6 % of a horse's starts and 75.2 % of a trainer's (median 4 drivers per
-# horse, mean 7.9 per trainer, max 131). A cap that did not say so would read as
-# a complete table. The `, driver` tiebreak is what makes the cut deterministic
-# rather than whichever equal row DuckDB happened to return — 970 trainers have
-# a starts tie straddling the third and fourth driver.
-BREAKDOWNS = (
+# Both are capped, and the cap is **named in the title** because these are the
+# breakdowns that do not sum back to Overall. Top 3 drivers cover 79.6 % of a
+# horse's starts and 75.2 % of a trainer's (median 4 drivers per horse, mean 7.9
+# per trainer); top 3 trainers cover only 52.5 % of a driver's, because a driver
+# has a median of 2 trainers but a maximum of 922 and the busy drivers carry the
+# rows. A cap that did not say so would read as a complete table. The `, name`
+# tiebreak makes the cut deterministic rather than whichever equal row DuckDB
+# happened to return — 970 trainers have a starts tie straddling the third and
+# fourth driver.
+DRIVER_AXIS = Axis('Driver (top 3 by starts)', 'driver', _DRIVER,
+                   'starts DESC, driver', limit=3)
+TRAINER_AXIS = Axis('Trainer (top 3 by starts)', 'trainer', _TRAINER,
+                    'starts DESC, trainer', limit=3)
+
+# crosscheck.REPORTS's shape, one entry per axis, in the order the UI stacks
+# them: the equipment, then the race's shape, then the timeline, then where, and
+# the people last. The UI builds a labelled table per entry in a loop, so a
+# tenth breakdown is one line here and no widget code.
+#
+# The shoe combinations involving X are kept as they are rather than folded into
+# the majority or into one 'unknown' — the K/E/X codes stay verbatim through the
+# whole pipeline, and X is 'not reported' rather than a third kind of shoeing,
+# so folding it either invents shoeings or hides starts. specialCart is Heppa's
+# americanSulkyKEX (K = yes, E = no, X = not reported) and gets the same
+# treatment, glossed once in the UI legend.
+#
+# Post position sits directly after the start type it is namespaced by. Track is
+# the second capped axis, and the cap is in its title for the same reason the
+# counterpart role's is: 99 codes archive-wide, a median of 7 tracks per horse
+# (max 30), 8 per trainer (max 47) and 5 per driver (max 46), with the top 5
+# covering 78.7 % / 75.8 % / 68.9 % of the starts respectively. The two tables
+# that do not sum back therefore sit together at the foot of the pane, where a
+# reader has already seen the complete ones.
+COMMON = (
     Axis('Overall'),
     Axis('Shoes (front / rear)', 'shoes',
          "coalesce(hs.frontShoes || ' / ' || hs.rearShoes, 'unknown')",
@@ -379,13 +504,64 @@ BREAKDOWNS = (
     Axis('Distance class', 'distance', f"coalesce({_CLASS}, 'unknown')",
          f'{_CLASS_ORDER}, distance', _CLASS_ORDER),
     Axis('Start type', 'start type', _AUTO, 'starts DESC, "start type"'),
+    Axis('Post position (per start type)', 'post', _POST, _POST_ORDER, _POST_ORDER),
     Axis('Days since previous start', 'days since previous', _LAYOFF,
          _LAYOFF_ORDER, _LAYOFF_ORDER),
-    Axis('Driver (top 3 by starts)', 'driver', _DRIVER, 'starts DESC, driver',
-         limit=3),
+    Axis('Track (top 5 by starts)', 'track', _TRACK, 'starts DESC, track', limit=5),
 )
 
+# Constant across subjects, which is what lets the UI build its panels once and
+# never rebuild them when the subject changes. See `breakdowns`.
+AXIS_COUNT = len(COMMON) + 1
+
+
+class Subject(NamedTuple):
+    """Whose starts a breakdown counts — a horse, a trainer or a driver.
+
+    `COMMON` says how to group a set of `heppa_start` rows; a Subject says
+    *which* rows, what a drill-down lists behind one bucket, and which
+    counterpart role its last axis asks about. Nothing else differs: the label
+    expressions, PLACINGS, the orderings and the absent filter are the same
+    questions asked of the same table, which is the whole reason there is no
+    `trainer_stats.py` and no `driver_stats.py`.
+
+    `frm` is the contract, and it is three things at once. The table is aliased
+    `hs`, because every shared expression above says `hs.`. It takes exactly one
+    `?`, the identity, so `bucket_starts` can build the parameters without
+    knowing the subject. And it *ends* in a WHERE, so `Axis.starts` can hang
+    `AND <label> = ?` off it.
+
+    `partner` is the counterpart-role axis, and it is what makes the third
+    subject cost one line instead of a widget rewrite: every subject answers
+    `AXIS_COUNT` axes, so the UI retitles a panel rather than rebuilding a tree.
+    """
+
+    name: str        # the noun the UI puts in its prompt and its messages
+    frm: str         # FROM … WHERE <identity> = ? AND NOT absent
+    columns: str     # the drill-down's SELECT list
+    search: str      # (display…, identity last), given (term, term, limit)
+    partner: Axis    # the counterpart role its last axis asks about
+
+
+HORSE = Subject('horse', _HORSE_FROM, START_COLUMNS, SQL_SEARCH_HORSES, DRIVER_AXIS)
+TRAINER = Subject('trainer', _TRAINER_FROM, _WITH_HORSE, SQL_SEARCH_TRAINERS,
+                  DRIVER_AXIS)
+DRIVER = Subject('driver', _DRIVER_FROM, _WITH_HORSE, SQL_SEARCH_DRIVERS,
+                 TRAINER_AXIS)
+
+# The order `t` cycles through in the UI.
+SUBJECTS = (HORSE, TRAINER, DRIVER)
+
 SEARCH_LIMIT = 50
+
+
+def breakdowns(subject: Subject) -> tuple:
+    """The axes for one subject: the shared eight, then its counterpart role.
+
+    Always `AXIS_COUNT` long, whichever subject it is, so the UI's panels are
+    built once and only ever retitled.
+    """
+    return COMMON + (subject.partner,)
 
 
 def fetch(conn, sql: str, params=()):
@@ -402,9 +578,9 @@ def search(conn, subject: Subject, term: str, limit: int = SEARCH_LIMIT):
     """Subjects whose name or identity contains `term`, most starts first.
 
     One row per identity — per `canonicalKey` for a horse, so the three ways
-    Veikkaus spells `Humble Stance` are one hit; per `trainerId` for a trainer.
-    The last column is that identity, for the caller to pass back to
-    `Axis.breakdown`; the first is what to display for it.
+    Veikkaus spells `Humble Stance` are one hit; per `trainerId` or `driverId`
+    for a person. The last column is that identity, for the caller to pass back
+    to `Axis.breakdown`; the first is what to display for it.
     """
     return fetch(conn, subject.search, [term, term, limit])
 
@@ -423,7 +599,8 @@ if __name__ == '__main__':
     import sys
 
     term = sys.argv[1] if len(sys.argv) > 1 else ''
-    who = TRAINER if len(sys.argv) > 2 and sys.argv[2].startswith('t') else HORSE
+    role = sys.argv[2][0].lower() if len(sys.argv) > 2 else 'h'
+    who = {'t': TRAINER, 'd': DRIVER}.get(role, HORSE)
     with db_read(DEFAULT_DB) as connection:
         names, hits = search(connection, who, term)
         count = names.index('starts')
@@ -431,7 +608,7 @@ if __name__ == '__main__':
               + ', '.join(f'{r[0]} ({r[count]})' for r in hits[:5]))
         if hits:
             key = hits[0][-1]
-            for axis in BREAKDOWNS:
+            for axis in breakdowns(who):
                 columns, rows = fetch(connection, axis.breakdown(who), [key])
                 print(f'\n=== {key} — {axis.title} ===')
                 print('  ' + '  '.join(str(c) for c in columns))
