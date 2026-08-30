@@ -814,8 +814,11 @@ def test_the_trainer_start_list_names_the_horse_first(db):
 # --- the driver axis -------------------------------------------------------
 
 
-def four_drivers(db):
-    """One subject, four drivers, one more start each than the next.
+def six_drivers(db):
+    """One subject, six drivers, one more start each than the next.
+
+    Six rather than four, because the cap is 5: a fixture that cannot overflow
+    the cap does not test it, and this one has exactly one driver to cut.
 
     Each gets its own id, because that is the archive's own state: zero of the
     3,196 driver ids carry two different first+last names.
@@ -824,27 +827,31 @@ def four_drivers(db):
     db.store_heppa_starts([
         hstart(f'2026-01-{day:02d}', 'boomer|2015', driver_id=f'D-{first}',
                driver_first=first, driver_last='Ahonen')
-        for first, days in (('Aki', (1, 2, 3, 4)), ('Bea', (5, 6, 7)),
-                            ('Cid', (8, 9)), ('Dan', (10,)))
+        for first, days in (('Aki', (1, 2, 3, 4, 5, 6)), ('Bea', (7, 8, 9, 10, 11)),
+                            ('Cid', (12, 13, 14, 15)), ('Dan', (16, 17, 18)),
+                            ('Eve', (19, 20)), ('Fay', (21,)))
         for day in days])
 
 
-def test_the_driver_breakdown_keeps_only_the_three_busiest(db):
-    """One of the two capped axes. A horse has a median of 4 drivers and a
-    trainer a mean of 7.9 (max 131), so an uncapped panel would be a wall; the
-    cap is named in the axis title because the table then does not sum back."""
-    four_drivers(db)
+def test_the_driver_breakdown_keeps_only_the_five_busiest(db):
+    """One of the two capped axes, and every subject caps it at 5. A top 3 cut a
+    majority of them: 56.1 % of horses have more than 3 drivers and 38.6 % more
+    than 5 (median 4, mean 5.5, max 35), and 3 drivers cover 79.5 % of a horse's
+    starts against 88.8 % for 5. The cap is named in the axis title because the
+    table then does not sum back."""
+    six_drivers(db)
     assert [(row[0], row[1]) for row in rows_of(db, axis('Driver'))] == [
-        ('Aki Ahonen', 4), ('Bea Ahonen', 3), ('Cid Ahonen', 2)]
+        ('Aki Ahonen', 6), ('Bea Ahonen', 5), ('Cid Ahonen', 4),
+        ('Dan Ahonen', 3), ('Eve Ahonen', 2)]
 
 
 def test_a_driver_cut_by_the_cap_is_still_a_bucket_that_opens(db):
     """The cap is on the breakdown and not on `starts`: a bucket on screen opens
     exactly its count, and the query behind a bucket knows nothing about how
     many buckets were displayed."""
-    four_drivers(db)
-    assert len(starts_of(db, axis('Driver'), 'Aki Ahonen')[1]) == 4
-    assert len(starts_of(db, axis('Driver'), 'Dan Ahonen')[1]) == 1
+    six_drivers(db)
+    assert len(starts_of(db, axis('Driver'), 'Aki Ahonen')[1]) == 6
+    assert len(starts_of(db, axis('Driver'), 'Fay Ahonen')[1]) == 1
 
 
 def test_the_driver_label_is_the_full_name_not_the_short_form(db):

@@ -479,14 +479,20 @@ class Axis(NamedTuple):
 # to know which trainers — asking a driver which drivers drove it returns one
 # row equal to Overall.
 #
-# **There is one per subject rather than one per role, because the cap differs.**
-# A horse keeps the top 3, which its own spread justifies: a median of 4 drivers,
-# and 3 of them already cover 72.5 % of its starts. The two people see 5, because
-# their books are wider and a top 3 hides too much of them — for a trainer 3
-# drivers cover 75.1 % of the starts and 5 cover 83.9 % (mean 7.9 drivers per
-# trainer, max 131); for a driver 3 trainers cover only 52.5 % and 5 cover
-# 57.9 %, because a driver has a median of 2 trainers but a maximum of 922 and
-# the busy drivers carry the rows.
+# **There is one per subject rather than one per role**, because the axis is a
+# per-`Subject` field and nothing forces the three to agree. They happen to all
+# be 5 today, which is a decision rather than a coincidence: a top 3 cut a
+# majority of every subject. 56.1 % of horses have more than 3 drivers and
+# 38.6 % more than 5 (median 4, mean 5.5, max 35), and the coverage says the
+# same — for a horse 3 drivers cover 79.5 % of the starts and 5 cover 88.8 %;
+# for a trainer 75.1 % and 83.9 % (mean 7.9 drivers per trainer, max 131); for a
+# driver 3 trainers cover only 52.5 % and 5 cover 57.9 %, because a driver has a
+# median of 2 trainers but a maximum of 922 and the busy drivers carry the rows.
+#
+# Those horse figures are grouped on `canonicalKey`, which is what `_HORSE_FROM`
+# joins for — grouping on `horseKey` reads 72.5 %/81.2 % instead, because the
+# 182 horses split across 365 keys are then counted as separate, shorter
+# careers. Measure this the way the axis runs, not the way the table stores.
 #
 # The cap is **named in the title** because these are the breakdowns that do not
 # sum back to Overall, and a cap that did not say so would read as a complete
@@ -499,7 +505,7 @@ def _partner(role: str, label: str, limit: int) -> Axis:
                 f'starts DESC, {role}', limit=limit)
 
 
-HORSE_DRIVERS = _partner('driver', _DRIVER, 3)
+HORSE_DRIVERS = _partner('driver', _DRIVER, 5)
 TRAINER_DRIVERS = _partner('driver', _DRIVER, 5)
 DRIVER_TRAINERS = _partner('trainer', _TRAINER, 5)
 
