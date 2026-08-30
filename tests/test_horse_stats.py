@@ -428,24 +428,67 @@ def six_tracks(db):
         for day in days])
 
 
-def test_the_track_breakdown_keeps_only_the_five_busiest(db):
+def won_and_raced(db):
+    """Six tracks where the win order and the starts order disagree.
+
+    A: 10 starts 1 win · B: 3 starts 3 wins · C: 20 starts · D: 5 · E: 2 · F: 1
+    """
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    rows = []
+    for month, (code, starts, wins) in enumerate(
+            (('A', 10, 1), ('B', 3, 3), ('C', 20, 0),
+             ('D', 5, 0), ('E', 2, 0), ('F', 1, 0)), start=1):
+        for day in range(1, starts + 1):
+            rows.append(hstart(f'2026-{month:02d}-{day:02d}', 'boomer|2015',
+                               track=code, placement=1 if day <= wins else None))
+    db.store_heppa_starts(rows)
+
+
+def test_the_track_breakdown_ranks_by_wins_not_by_starts(db):
+    """The busiest track is not the one a subject is *good* at, so this axis
+    ranks by wins. B, on 3 starts, outranks A on 10 and C on 20.
+
+    Ordering on the `"1st"` output alias rather than repeating the FILTER keeps
+    one definition of what a win is.
+    """
+    won_and_raced(db)
+    assert [(row[0], row[1], row[2]) for row in rows_of(db, axis('Track'))][:2] == [
+        ('B', 3, 3), ('A', 10, 1)]
+
+
+def test_tracks_with_no_win_fill_the_remaining_slots_by_starts(db):
+    """**The fallback is the normal case, not an edge case.** A subject wins at
+    a median of 1 track (a horse or a trainer) or 0 (a driver), and 89.6 % of
+    horses, 80.5 % of trainers and 84.0 % of drivers win at fewer than 5 tracks
+    — so for most subjects most of this table is the fallback.
+
+    Two tracks here carry a win, so the other three slots go to the most-raced
+    of the winless ones: every one of those ties at 0 wins, and `starts DESC`
+    breaks the tie. F, the least raced, is the one cut.
+    """
+    won_and_raced(db)
+    assert [(row[0], row[1]) for row in rows_of(db, axis('Track'))] == [
+        ('B', 3), ('A', 10), ('C', 20), ('D', 5), ('E', 2)]
+
+
+def test_the_track_breakdown_keeps_only_five(db):
     """The second capped axis. There are 99 codes archive-wide and a median of
     7 tracks per horse (max 30), 8 per trainer (max 47) and 5 per driver (max
-    46), so an uncapped panel is a wall for the busy subjects; the top 5 cover
-    78.7 % / 75.8 % / 68.9 % of their starts, which is why the cap is named in
-    the title — the table does not sum back to Overall."""
+    46), so an uncapped panel is a wall for the busy subjects — which is why the
+    cap is named in the title; the table does not sum back to Overall."""
     six_tracks(db)
-    assert [(row[0], row[1]) for row in rows_of(db, axis('Track'))] == [
-        ('H', 6), ('T', 5), ('L', 4), ('KU', 3), ('LA', 2)]
+    assert len(rows_of(db, axis('Track'))) == 5
 
 
 def test_a_track_cut_by_the_cap_is_still_a_bucket_that_opens(db):
     """The cap is on the breakdown and not on `starts`, as it is for the
     counterpart-role axis: the query behind a bucket knows nothing about how
     many buckets were displayed."""
-    six_tracks(db)
-    assert len(starts_of(db, axis('Track'), 'H')[1]) == 6
-    assert len(starts_of(db, axis('Track'), 'J')[1]) == 1
+    won_and_raced(db)
+    # F is the row the cap cuts, and it still opens its own start
+    assert [row[0] for row in rows_of(db, axis('Track'))].count('F') == 0
+    assert len(starts_of(db, axis('Track'), 'F')[1]) == 1
+    assert len(starts_of(db, axis('Track'), 'C')[1]) == 20
 
 
 def test_the_track_bucket_is_the_registry_code_the_start_list_shows(db):
@@ -922,9 +965,9 @@ def test_the_last_axis_asks_about_the_counterpart_role():
     """A horse and a trainer want to know which drivers; a driver wants to know
     which trainers. Asking a driver which drivers drove it would return one row
     equal to Overall."""
-    assert horse_stats.breakdowns(horse_stats.HORSE)[-1] is horse_stats.DRIVER_AXIS
-    assert horse_stats.breakdowns(horse_stats.TRAINER)[-1] is horse_stats.DRIVER_AXIS
-    assert horse_stats.breakdowns(horse_stats.DRIVER)[-1] is horse_stats.TRAINER_AXIS
+    assert horse_stats.breakdowns(horse_stats.HORSE)[-1] is horse_stats.HORSE_DRIVERS
+    assert horse_stats.breakdowns(horse_stats.TRAINER)[-1] is horse_stats.TRAINER_DRIVERS
+    assert horse_stats.breakdowns(horse_stats.DRIVER)[-1] is horse_stats.DRIVER_TRAINERS
 
 
 def test_a_driver_is_broken_down_by_trainer_and_a_trainer_by_driver(db):
@@ -940,29 +983,30 @@ def test_a_driver_is_broken_down_by_trainer_and_a_trainer_by_driver(db):
                driver_id='D2', driver_first='Hannu', driver_last='Torvinen'),
     ])
     assert [(row[0], row[1]) for row in rows_of(
-        db, horse_stats.TRAINER_AXIS, DRIVER_ID, horse_stats.DRIVER)] == [
+        db, horse_stats.DRIVER_TRAINERS, DRIVER_ID, horse_stats.DRIVER)] == [
         ('Ann Aho', 1), ('Bo Berg', 1)]
     assert [(row[0], row[1]) for row in rows_of(
-        db, horse_stats.DRIVER_AXIS, 'T1', horse_stats.TRAINER)] == [
+        db, horse_stats.TRAINER_DRIVERS, 'T1', horse_stats.TRAINER)] == [
         ('Hannu Torvinen', 1), ('Santtu Raitala', 1)]
 
 
-def test_the_trainer_breakdown_of_a_driver_keeps_only_the_three_busiest(db):
-    """The counterpart cap bites harder on a driver than on a horse: top 3
-    trainers cover 52.5 % of a driver's starts, against the driver axis's 79.6 %
-    of a horse's, because a driver has a median of 2 trainers but a maximum of
-    922. The title is what says so."""
+def test_the_trainer_breakdown_of_a_driver_keeps_only_the_five_busiest(db):
+    """A person's counterpart cap is 5 where a horse's is 3, because their books
+    are wider. It still bites hardest on a driver: 5 trainers cover 57.9 % of a
+    driver's starts (3 cover 52.5 %), against 83.9 % of a trainer's, because a
+    driver has a median of 2 trainers but a maximum of 922. The title says so."""
     db.store_horses([horse('boomer|2015', 'Boomer')])
     db.store_heppa_starts([
         hstart(f'2026-0{i}-{day:02d}', 'boomer|2015', trainer=f'T{i}',
                trainer_name=name)
         for i, (name, days) in enumerate(
-            (('Ann Aho', (1, 2, 3, 4)), ('Bo Berg', (1, 2, 3)),
-             ('Cai Cole', (1, 2)), ('Dan Dahl', (1,))), start=1)
+            (('Ann Aho', (1, 2, 3, 4, 5, 6)), ('Bo Berg', (1, 2, 3, 4, 5)),
+             ('Cai Cole', (1, 2, 3, 4)), ('Dan Dahl', (1, 2, 3)),
+             ('Eva Eks', (1, 2)), ('Fia Falk', (1,))), start=1)
         for day in days])
-    rows = rows_of(db, horse_stats.TRAINER_AXIS, DRIVER_ID, horse_stats.DRIVER)
+    rows = rows_of(db, horse_stats.DRIVER_TRAINERS, DRIVER_ID, horse_stats.DRIVER)
     assert [(row[0], row[1]) for row in rows] == [
-        ('Ann Aho', 4), ('Bo Berg', 3), ('Cai Cole', 2)]
-    # capped on the breakdown only: the fourth trainer still opens its starts
-    assert len(starts_of(db, horse_stats.TRAINER_AXIS, 'Dan Dahl', DRIVER_ID,
+        ('Ann Aho', 6), ('Bo Berg', 5), ('Cai Cole', 4), ('Dan Dahl', 3), ('Eva Eks', 2)]
+    # capped on the breakdown only: the sixth trainer still opens its starts
+    assert len(starts_of(db, horse_stats.DRIVER_TRAINERS, 'Fia Falk', DRIVER_ID,
                          horse_stats.DRIVER)[1]) == 1
