@@ -20,6 +20,9 @@ of them wrong:
   gap is NULL, not `prev_start`'s epoch sentinel, so bucketing it with a
   `<= 14` predicate silently files every horse's earliest start as a quick
   turnaround.
+- **Race numbers 20 and above are not the ordinary programme**, and are counted
+  nowhere here — 36,309 non-absent rows of qualifiers and pony racing, which
+  would otherwise sit in every rate beside the races they are not.
 
 Each breakdown is an `Axis`, and the label expression that names its buckets is
 written once: the aggregate selects it, and the drill-down behind a clicked
@@ -48,6 +51,37 @@ from .archive_db import DEFAULT_DB, db_read
 # unset columns NULL and `NOT NULL` is NULL — which would filter out every row
 # the tests insert.
 NOT_ABSENT = 'NOT coalesce(hs.absent, false)'
+
+# Race numbers 20 and above are not the ordinary programme, and nothing in this
+# module counts them. The archive holds two such bands and neither is a race the
+# rest of a subject's record should be averaged with:
+#
+# - **21-25 are the qualifiers** (koelähtö) — 10,864 non-absent starts over
+#   2,157 races, every one `eventType` YHDISTETTY, with **no prize money at all**
+#   and no betting.
+# - **31-42 are pony racing** — 25,445 starts over 3,836 A_PONIT/B_PONIT races,
+#   with a purse (avg 114 € first prize) but again no betting.
+#
+# Against 262,183 non-absent starts at race numbers 1-14, avg 2,293 € first
+# prize. **There are no race numbers between 15 and 20**, so this threshold sits
+# in a gap in the data rather than on a boundary.
+#
+# The cost is real and was accepted rather than overlooked: 1,944 horses, 692
+# trainers and 721 drivers have no starts left once these go. A trainer or a
+# driver in that set drops out of search entirely, because neither person search
+# has a zero-start arm; a horse still appears with 0 starts, because
+# SQL_SEARCH_HORSES LEFT JOINs.
+#
+# No coalesce, unlike NOT_ABSENT: `raceNumber` is part of heppa_start's PRIMARY
+# KEY, so a NULL is impossible by construction rather than merely absent today —
+# the same argument _TRACK makes for `trackCode`.
+REAL_RACE = 'hs.raceNumber < 20'
+
+# What every query in this module counts: a horse that went to the gate, in a
+# real race. Written once so the breakdown, the drill-down behind a clicked
+# bucket and the search hit count cannot drift apart — the same reason `Axis`
+# writes its label expression once.
+COUNTED = f'{NOT_ABSENT} AND {REAL_RACE}'
 
 # Quoted identifiers so '1st'/'2nd'/'3rd' survive as table headers.
 #
@@ -82,7 +116,7 @@ PLACINGS = """count(*)                                                 AS starts
 _HORSE_FROM = f"""
     FROM archive.heppa_start hs
     JOIN archive.horse h ON h.horseKey = hs.horseKey
-    WHERE h.canonicalKey = ? AND {NOT_ABSENT}
+    WHERE h.canonicalKey = ? AND {COUNTED}
 """
 
 # A trainer is identified by `trainerId`, never by the name. Both are non-NULL
@@ -96,7 +130,7 @@ _HORSE_FROM = f"""
 # really had — and nothing here needs that table: `hs.horseName` is on the row.
 _TRAINER_FROM = f"""
     FROM archive.heppa_start hs
-    WHERE hs.trainerId = ? AND {NOT_ABSENT}
+    WHERE hs.trainerId = ? AND {COUNTED}
 """
 
 # A driver is identified by `driverId`, never by either name column. It is
@@ -111,7 +145,7 @@ _TRAINER_FROM = f"""
 # the driver really had — and `hs.horseName` is on the row.
 _DRIVER_FROM = f"""
     FROM archive.heppa_start hs
-    WHERE hs.driverId = ? AND {NOT_ABSENT}
+    WHERE hs.driverId = ? AND {COUNTED}
 """
 
 # The distance class, with the auto-start prefix taken off: the eight codes
@@ -290,7 +324,12 @@ _TRAINER = 'hs.trainerName'
 # because 5,419 of 17,099 horses have no heppa_start row and must still be
 # findable; and starts DESC because the horse you meant is the one that raced
 # most, not the one whose name sorts first.
-SQL_SEARCH_HORSES = """
+#
+# An f-string, alone among the three searches' literals, so that `starts`
+# counts what the panels count: writing the filter out inline here would be a
+# second definition of which rows are a start, free to drift from COUNTED. The
+# query holds no braces of its own, so nothing needs escaping.
+SQL_SEARCH_HORSES = f"""
     WITH matched AS (
         SELECT DISTINCT canonicalKey
         FROM archive.horse
@@ -299,8 +338,7 @@ SQL_SEARCH_HORSES = """
     )
     SELECT any_value(h.horseName) FILTER (WHERE h.horseKey = h.canonicalKey) AS horse,
            any_value(h.birthYear) FILTER (WHERE h.horseKey = h.canonicalKey) AS born,
-           count(*) FILTER (WHERE hs.meetDate IS NOT NULL
-                              AND NOT coalesce(hs.absent, false))            AS starts,
+           count(*) FILTER (WHERE hs.meetDate IS NOT NULL AND {COUNTED})    AS starts,
            h.canonicalKey                                                    AS canonicalKey
     FROM matched m
     JOIN archive.horse h ON h.canonicalKey = m.canonicalKey
@@ -340,7 +378,7 @@ SQL_SEARCH_TRAINERS = f"""
            hs.trainerId                                     AS trainerId
     FROM archive.heppa_start hs
     WHERE (lower(hs.trainerName) LIKE '%' || lower(?) || '%' OR hs.trainerId = ?)
-      AND {NOT_ABSENT}
+      AND {COUNTED}
     GROUP BY hs.trainerId
     ORDER BY starts DESC, trainer
     LIMIT ?
@@ -372,7 +410,7 @@ SQL_SEARCH_DRIVERS = f"""
            hs.driverId                                      AS driverId
     FROM archive.heppa_start hs
     WHERE (lower({_DRIVER}) LIKE '%' || lower(?) || '%' OR hs.driverId = ?)
-      AND {NOT_ABSENT}
+      AND {COUNTED}
     GROUP BY hs.driverId
     ORDER BY starts DESC, driver
     LIMIT ?

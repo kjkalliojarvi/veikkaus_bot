@@ -66,7 +66,8 @@ LEGEND = ('shoes / cart: K = shod / american sulky · E = barefoot / normal · X
           'still win\n'
           'track is the registry code, as in the start list\n'
           'days since previous start is the horse\'s own gap, whoever drove or trained it\n'
-          'absent (withdrawn) starts are excluded throughout')
+          'absent (withdrawn) starts are excluded throughout, and so are race numbers 20+ '
+          '— the qualifiers (21-25, no purse) and pony racing (31+)')
 
 
 class GuardedTable(DataTable):
