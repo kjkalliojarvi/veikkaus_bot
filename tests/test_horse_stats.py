@@ -180,6 +180,61 @@ def test_every_breakdown_sums_back_to_the_overall_start_count(db, who):
             assert counted == starts
 
 
+# --- what a real race is ---------------------------------------------------
+
+
+def test_race_numbers_20_and_above_are_excluded_from_every_count(db, who):
+    """The archive's high race numbers are not the ordinary programme.
+
+    21-25 are the qualifiers (koelähtö): 10,864 non-absent starts over 2,157
+    YHDISTETTY races, with no prize money at all and no betting. 31-42 are pony
+    racing: 25,445 starts over 3,836 A_PONIT/B_PONIT races, with a small purse
+    and again no betting. Against 262,183 starts at race numbers 1-14. There are
+    **no race numbers between 15 and 20**, so `< 20` sits in a gap in the data
+    rather than on a boundary — which is why one row here is race 21 and the
+    other 31, the two bands, rather than a number on the edge.
+    """
+    subject, key = who
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015', placement=1),
+        hstart('2026-01-08', 'boomer|2015', race_number=21, placement=1),
+        hstart('2026-01-15', 'boomer|2015', race_number=31, placement=1),
+    ])
+    assert overall(db, key, subject) == (1, 1, 0, 0, 0, 0)
+    for one in horse_stats.breakdowns(subject):
+        assert sum(row[1] for row in rows_of(db, one, key, subject)) == 1
+
+
+def test_a_qualifier_never_appears_in_a_drill_down(db, who):
+    """The filter is on `Subject.frm`, which both queries build on, so a bucket
+    still opens exactly what it counts. A second copy of the predicate in the
+    drill-down is what this would catch."""
+    subject, key = who
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015'),
+        hstart('2026-01-08', 'boomer|2015', race_number=21),
+    ])
+    names, rows = starts_of(db, axis('Overall'), None, key, subject)
+    assert [row[names.index('date')] for row in rows] == ['2026-01-01']
+
+
+def test_the_search_count_excludes_the_races_the_panels_exclude(db, who):
+    """A hit reading '2 starts' that opens a screen showing 1 is the drift the
+    one shared predicate exists to prevent — the same argument `Axis` makes for
+    writing its label expression once."""
+    subject, key = who
+    db.store_horses([horse('boomer|2015', 'Boomer')])
+    db.store_heppa_starts([
+        hstart('2026-01-01', 'boomer|2015'),
+        hstart('2026-01-08', 'boomer|2015', race_number=31),
+    ])
+    term = {'horse': 'boomer', 'trainer': 'pasi', 'driver': 'raitala'}[subject.name]
+    names, rows = horse_stats.search(db.conn, subject, term)
+    assert rows[0][names.index('starts')] == overall(db, key, subject)[0] == 1
+
+
 # --- identity --------------------------------------------------------------
 
 
