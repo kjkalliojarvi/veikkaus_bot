@@ -23,6 +23,7 @@ uv run veikkaus heppa-horses                # one registry record per horse
 uv run veikkaus heppa-foreign               # meetings abroad: starts Finnish horses made there
                                             #   list extra ones in foreign_meetings.csv
 uv run veikkaus heppa-stats                 # the registry's career totals, to measure what is missing
+uv run veikkaus leg-percentages             # the T-pools' per-leg betting percentages
 uv run veikkaus status                      # how far both got
 uv run veikkaus parse                       # raw/ -> archive.* tables
 uv run veikkaus crosscheck                  # do the two sources agree?
@@ -40,18 +41,47 @@ uv run veikkaus parse                       # the three below read the archive
 uv run veikkaus heppa-horses
 uv run veikkaus heppa-foreign
 uv run veikkaus heppa-stats                 # optional: another 14,050 requests
+uv run veikkaus leg-percentages             # optional: needs `backfill --odds`, not a parse
 uv run veikkaus parse                       # loads what they fetched
 ```
+
+`leg-percentages` is the one archive-driven command that does **not** need a `parse` in front of it: the pool ids it crawls are read straight out of the archived `pools` payloads in `data/raw/`, so what it needs is a `backfill --odds` run, parsed or not.
 
 The recurring cycle needs only one parse, because those commands read the *previous* run's — see [Keeping the archive up to date](#keeping-the-archive-up-to-date).
 
 Fetching and parsing are deliberately separate. `backfill` only writes gzipped raw responses into `data/raw/` and records every fetch in a manifest table, so it is resumable — kill it and rerun the same command. It crawls newest date first, one request at a time with a ≥1 s delay and exponential backoff. `parse` then reads the raw archive into the `archive.*` tables and can be re-run at any time without re-crawling.
 
-Every command refuses a `--db` path that is not already there, because DuckDB creates a database for whatever path it is handed: a mistyped `--db` would otherwise mint an empty archive and then report zero of everything, which looks exactly like the real one having gone missing. `backfill`, `heppa` and `parse` take `--create-db` for the genuine first run. The other six do not, for two different reasons: `status`, `crosscheck` and `stats` only ever read one, while `heppa-horses`, `heppa-foreign` and `heppa-stats` are driven by what the archive already holds — so none of them could do anything with a database it had just minted.
+Every command refuses a `--db` path that is not already there, because DuckDB creates a database for whatever path it is handed: a mistyped `--db` would otherwise mint an empty archive and then report zero of everything, which looks exactly like the real one having gone missing. `backfill`, `heppa` and `parse` take `--create-db` for the genuine first run. The other seven do not, for two different reasons: `status`, `crosscheck` and `stats` only ever read one, while `heppa-horses`, `heppa-foreign`, `heppa-stats` and `leg-percentages` are driven by what the archive already holds — so none of them could do anything with a database it had just minted.
 
-`--odds` additionally crawls win-pool odds for every race (roughly doubles the request count); without it, final win odds are only known for the paid places.
+`--odds` additionally crawls the pools of every race, the win-pool odds behind them, and the T-pools' per-leg betting percentages (roughly doubles the request count); without it, final win odds are only known for the paid places and there are no betting percentages beyond Kaksari's.
 
 A five-year backfill is on the order of 50,000 requests — about 28 hours at the default 2 s delay. Note that veikkaus.fi's `robots.txt` disallows automated fetching of these paths: keep the crawl slow and single-threaded, and set `VEIKKAUS_CONTACT` to a contact address so the `User-Agent` identifies you. If this becomes more than personal research, ask Veikkaus or Suomen Hippos for sanctioned access.
+
+### T-pool betting percentages
+
+How the Toto4/5/64/65/75 money was spread over the runners of each leg — the crowd's opinion of a race, weighted by real money, at a finer grain than the win odds. The Veikkaus API has them, and not where you would look for them: a runners payload's `betPercentages` carries the **single-race** pools only (KAK, TRO, DUO, EKS — verified over the whole raw zone; there has never been a T-pool row in `archive.bet_percentage`). They come from `/pool/{poolId}/odds` instead, the same endpoint as the win-pool odds, which for a pool with legs returns one row per (leg, runner):
+
+```json
+{"legNumber": 1, "raceNumber": 4, "raceId": 3476195931, "runnerNumber": 5,
+ "runnerId": 1056861150, "percentage": 3056, "amount": 284265, "winProbable": 289}
+```
+
+`percentage` is hundredths of a percent and sums to ~10000 within a leg; `amount` is the money on that runner in that leg. They land in `archive.leg_percentage`, which joins `archive.start` on either `runnerId` or `(raceId, startNumber)`.
+
+One caveat for modelling: **a scratched runner keeps the money bet on it before the withdrawal**, up to 62 % of a leg in one case, and that money still counts into the leg's ~10000. `scratched` marks those rows — the payload sends the flag only when it is set, so the column is TRUE or NULL and never FALSE — and it is the more current of the two scratched columns, since the Veikkaus runners payload behind `archive.start.scratched` is entry data and misses a horse withdrawn at the track.
+
+**This is the one Veikkaus figure that is genuinely retrospective.** `stats` and `prevStarts` ride along in a runners payload only while the card is current, and win odds have to be captured before post time — but a T-pool's odds payload keeps its closing percentages indefinitely. Verified against the first day of the archive: `/pool/7739521/odds` still returns all 81 rows of the Toto75 of 2021-01-02, seven legs, `netSales` 35,240,376, frozen at its final `updated`. So this needs no live cycle:
+
+```bash
+uv run veikkaus leg-percentages                   # ~3,180 requests, ~1.8 h
+uv run veikkaus leg-percentages --limit 20        # a few pools, to try it
+```
+
+It reads the pool ids out of the `pools` payloads already in `data/raw/` and skips what it already has, so re-running it costs only the new ones. The full crawl was **3,182 pools with no failures — 178,175 rows over 12,906 races and 146,320 runners, 2021-01-01 to 2026-08-11**: T4 1,339 pools, T5 1,131, T75 365, T65 337, T64 9. None of the 15,642 legs sums outside 9,990–10,010 hundredths, and 178,160 of the rows join `archive.start` (the 15 that do not are vacated start numbers — scratched, 0 %, no horse). A runner can appear in two or three pools, since one race is often a leg of both the T4 and the T5.
+
+**One caveat beyond the scratched money:** 72 pools sit on the combination-pool meta-cards (`MM` 64, `Sl` 7, `T75` 1). Those pools are real — a Magic Monday T4 is a genuine cross-track pool, verified leg by leg against the Oulu and Teivo races it draws on — but a meta-card re-lists races that also run under their real track, so those 3,975 rows carry the meta-card's copy of `raceId`/`startNumber`. Exclude `trackNumber` 48/88 when grouping by card, exactly as the start-interval recompute does. Going forward `backfill --odds` enqueues them itself and this command is only needed to catch up the cards crawled before it existed.
+
+Two things worth knowing. A pool crawled *while betting was still open* stores percentages that are not final, and `--refetch-from` is what fixes that: `capturedAt` is deliberately not part of the primary key, so the re-fetch replaces the row rather than adding a second version beside it. And `LEG_POOL_TYPES` names the multi-leg types explicitly — every one of them carries a `hasCombinations` field and no single-race pool does, but it arrives `false` on 1,384 of the archived pools, which makes it a live-state flag rather than an identity. A type carrying it that the tuple does not name is reported by the command instead of being silently skipped.
 
 ### The Heppa half
 
@@ -122,7 +152,7 @@ Already-crawled dates cost nothing, so there is no date arithmetic to get wrong 
 
 **Why the lag.** A race that has not run still answers `/race/{raceId}/results` with HTTP 200 — `raceStatus: OPEN` and an empty `results` list. The crawler stores that, marks the task `done`, and because re-enqueueing uses `INSERT OR IGNORE` it is **never fetched again**. Crawl a card too early and its placings are gone from the Veikkaus side for good. Two days is comfortable; it also covers late protests and corrections.
 
-Heppa is more forgiving, and is the safety net. Its month-listing task id contains the actual date range, so the current month is re-listed on every run, and `expand()` only follows meetings whose `hasPublishedResults` is true — a meeting crawled too early is simply not crawled at all until its results exist. So even a premature Veikkaus card recovers its placings later; what you lose is that day's odds and betting percentages, which have to be captured live regardless.
+Heppa is more forgiving, and is the safety net. Its month-listing task id contains the actual date range, so the current month is re-listed on every run, and `expand()` only follows meetings whose `hasPublishedResults` is true — a meeting crawled too early is simply not crawled at all until its results exist. So even a premature Veikkaus card recovers its placings later; what you lose is that day's win odds and Kaksari percentages, which have to be captured live regardless. The T-pools' per-leg percentages are the exception — those stay fetchable for years, so `leg-percentages` recovers them whenever it next runs.
 
 **Why `heppa-horses` and `heppa-foreign` come before `parse`.** Both are driven by the archive rather than by a date window — the first reads horse ids out of `archive.heppa_start`, the second reads meetings out of `archive.prev_start` — so both see the *previous* cycle's parse. Putting them there means new horses and newly-discovered meetings lag by one cycle and you pay for one parse instead of two, which is the right trade for a scheduled job. The parse at the end is what loads what they fetched.
 
@@ -164,8 +194,9 @@ Everything lands in the `archive` schema of a DuckDB file:
 | `start` | (race, horse) — the race as entered and as it paid out, incl. `startInterval` (days since the horse's previous known start, across all three sources) |
 | `prev_start` | earlier start of a horse — the past-performance history, incl. its own `startInterval` and `coachName` (back-filled from the archived race) |
 | `stat` | (runner, period) — career/season form, current cards only |
-| `bet_percentage` | (runner, pool type) |
+| `bet_percentage` | (runner, pool type) — the single-race pools only: KAK, TRO, DUO, EKS |
 | `odds_snapshot` | (pool, runner, capture time) |
+| `leg_percentage` | (pool, leg, runner) |
 | `heppa_event` | race meeting in the Heppa registry, incl. track condition and temperature |
 | `heppa_race` | race in the Heppa registry |
 | `heppa_start` | (race, horse) as the registry recorded it — the whole field at every Finnish meeting, plus Finnish horses' starts abroad, told apart by `finnishTrack`; incl. `startInterval` |

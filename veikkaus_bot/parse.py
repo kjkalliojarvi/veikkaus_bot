@@ -844,6 +844,56 @@ def _store_odds(manifest: Manifest, raw_root: str, db: ArchiveDb,
     return count
 
 
+def _store_leg_percentages(manifest: Manifest, raw_root: str, db: ArchiveDb,
+                           unparsed_only: bool = True) -> int:
+    """Load the multi-leg pools' per-leg betting percentages.
+
+    Needs no sibling payload, unlike `_store_odds`: a leg row names its own
+    race and the pool-level figures are on the payload, so there is nothing to
+    look up in the pools listing. `capturedAt` is not in the primary key here
+    either, so an old payload with no `updated` field is a NULL rather than
+    something to reconstruct — see archive_db.CREATE_LEG_PERCENTAGE_TABLE.
+    """
+    consumed, rows = [], []
+    count = 0
+    for task, payload in _each_payload(manifest, raw_root, 'leg_odds', consumed,
+                                       unparsed_only):
+        pool_id = payload.get('poolId')
+        if pool_id is None:
+            continue
+        for odd in payload.get('odds', []):
+            leg_number, start_number = odd.get('legNumber'), odd.get('runnerNumber')
+            # Both are in the primary key and DuckDB will not hold a NULL
+            # there, where one such row would fail the whole batch it rides in
+            # rather than itself.
+            if leg_number is None or start_number is None:
+                continue
+            rows.append((pool_id,
+                         payload.get('poolType'),
+                         leg_number,
+                         odd.get('raceId'),
+                         odd.get('raceNumber'),
+                         start_number,
+                         odd.get('runnerId'),
+                         odd.get('percentage'),
+                         odd.get('amount'),
+                         odd.get('winProbable'),
+                         # Only ever sent as true — 2,275 true, 0 false and
+                         # 37,182 absent over the first 699 pools — so the key
+                         # is a flag rather than a field, and absence is left
+                         # NULL rather than folded to False, which would read
+                         # as the payload having said so.
+                         odd.get('scratched'),
+                         payload.get('updated'),
+                         payload.get('netSales'),
+                         payload.get('netPool')))
+        count += 1
+        _flush(db.store_leg_percentages, rows)
+    _flush(db.store_leg_percentages, rows, force=True)
+    manifest.mark_parsed(consumed)
+    return count
+
+
 # The final win odd is whatever the win pool last published for a runner.
 # Reading it back from the stored snapshots rather than rebuilding it while
 # loading them decouples `archive.start` from which odds payloads happen to be
@@ -1105,6 +1155,7 @@ def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> 
         runner_tasks = manifest.done('runners', unparsed)
         results = _results_map(manifest, raw_root, runner_tasks)
         _store_odds(manifest, raw_root, db, unparsed)
+        leg_pools = _store_leg_percentages(manifest, raw_root, db, unparsed)
         odds = _final_win_odds(db)
         cards = _parse_cards(manifest, raw_root, db, country, unparsed)
         races = _parse_races(manifest, raw_root, db, unparsed)
@@ -1125,6 +1176,7 @@ def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> 
         # recompute_heppa_links() above is what fills in.
         db.recompute_cross_source_intervals()
         counts = {'cards': cards, 'races': races, 'starts': starts,
+                  'multi-leg pools': leg_pools,
                   'prev-starts': prevstarts, 'heppa events': heppa_events,
                   'heppa races': heppa_races, 'heppa starts': heppa_starts,
                   'heppa horses': heppa_horses, 'heppa horse stats': heppa_stats}

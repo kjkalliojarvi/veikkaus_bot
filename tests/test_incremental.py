@@ -13,8 +13,8 @@ import duckdb
 import pytest
 
 from veikkaus_bot import parse as P
-from veikkaus_bot.crawler import (Manifest, VEIKKAUS_TYPES, cards_task, dates,
-                                  expand)
+from veikkaus_bot.crawler import (LEG_ODDS, Manifest, VEIKKAUS_TYPES,
+                                  _pool_odds_task, cards_task, dates, expand)
 from veikkaus_bot.heppa import (HEPPA_TYPES, _foreign_races_task, horse_task,
                                 results_task)
 from veikkaus_bot.heppa import expand as heppa_expand
@@ -300,3 +300,85 @@ def test_a_second_parse_does_not_re_add_the_meeting_abroad(archive):
     prepared = with_foreign_meeting(archive)
     assert run(prepared)['heppa starts'] == 5
     assert run(prepared)['heppa starts'] == 0
+
+
+# One T5 pool, two legs' worth of runners, shaped exactly as the live payload:
+# `ticks` twins `amount`, `scratched` is present on some rows and not others,
+# and the last row has no legNumber at all.
+LEG_POOL_ID = 55
+LEG_ODDS_PAYLOAD = {
+    'poolId': LEG_POOL_ID, 'poolType': 'T5', 'netSales': 930125, 'netPool': 604580,
+    'updated': 1788429164129,
+    'odds': [
+        {'legNumber': 1, 'raceNumber': 1, 'raceId': RACE_ID, 'runnerNumber': 9,
+         'runnerId': 109, 'percentage': 3056, 'amount': 284265, 'ticks': 284265,
+         'winProbable': 289},
+        {'legNumber': 1, 'raceNumber': 1, 'raceId': RACE_ID, 'runnerNumber': 7,
+         'runnerId': 107, 'percentage': 426, 'amount': 39620, 'ticks': 39620,
+         'winProbable': 1762, 'scratched': True},
+        {'legNumber': 2, 'raceNumber': 2, 'raceId': RACE_ID + 1, 'runnerNumber': 9,
+         'runnerId': 209, 'percentage': 1676, 'amount': 155922, 'ticks': 155922,
+         'winProbable': 1385},
+        {'raceNumber': 2, 'raceId': RACE_ID + 1, 'runnerNumber': 8, 'percentage': 79}]}
+
+
+def with_leg_pool(archive, payload=None):
+    """Add one crawled multi-leg pool to the fixture's raw zone."""
+    raw, db = archive
+    conn = duckdb.connect(db)
+    manifest = Manifest(conn)
+    task = _pool_odds_task('leg_odds', LEG_ODDS, MEET, CARD_ID, LEG_POOL_ID)
+    manifest.enqueue([task])
+    store(pathlib.Path(raw), task.rawPath,
+          LEG_ODDS_PAYLOAD if payload is None else payload)
+    manifest.mark(task, 'done', 200, None)
+    conn.close()
+    return raw, db
+
+
+def leg_rows(db):
+    conn = duckdb.connect(db)
+    rows = conn.execute("""SELECT legNumber, startNumber, percentage, amount, scratched,
+                                  capturedAt, netSales, poolType
+                           FROM archive.leg_percentage ORDER BY legNumber, startNumber"""
+                        ).fetchall()
+    conn.close()
+    return rows
+
+
+def test_a_crawled_multi_leg_pool_reaches_the_leg_percentage_table(archive):
+    counts = run(with_leg_pool(archive))
+    assert counts['multi-leg pools'] == 1
+    # The fourth row has no legNumber, which is in the primary key: dropped,
+    # and its neighbours still land.
+    assert leg_rows(archive[1]) == [
+        (1, 7, 426, 39620, True, 1788429164129, 930125, 'T5'),
+        (1, 9, 3056, 284265, None, 1788429164129, 930125, 'T5'),
+        (2, 9, 1676, 155922, None, 1788429164129, 930125, 'T5')]
+
+
+def test_a_second_parse_does_not_re_add_the_multi_leg_pool(archive):
+    prepared = with_leg_pool(archive)
+    run(prepared)
+    before = leg_rows(prepared[1])
+    assert run(prepared)['multi-leg pools'] == 0
+    assert leg_rows(prepared[1]) == before
+
+
+def test_a_refetched_pool_replaces_its_figures_rather_than_adding_a_version(archive):
+    """Why capturedAt is not in the primary key, unlike odds_snapshot's.
+
+    A pool crawled while betting was still open holds percentages that are not
+    final; --refetch-from is what fixes that, and it has to *replace* them —
+    one row per (pool, leg, runner), holding the closing figures.
+    """
+    prepared = with_leg_pool(archive)
+    run(prepared)
+    closing = {**LEG_ODDS_PAYLOAD, 'updated': LEG_ODDS_PAYLOAD['updated'] + 60_000,
+               'odds': [{**LEG_ODDS_PAYLOAD['odds'][0], 'percentage': 2900}]}
+    with_leg_pool(prepared, closing)
+    assert run(prepared)['multi-leg pools'] == 1
+    assert leg_rows(prepared[1]) == [
+        (1, 7, 426, 39620, True, 1788429164129, 930125, 'T5'),
+        (1, 9, 2900, 284265, None, 1788429164129 + 60_000, 930125, 'T5'),
+        (2, 9, 1676, 155922, None, 1788429164129, 930125, 'T5')]

@@ -141,6 +141,46 @@ CREATE_ODDS_TABLE = """
 INSERT_ODDS = 'INSERT OR REPLACE INTO archive.odds_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?);'
 ODDS_KEY = (0, 2, 3)  # poolId, startNumber, capturedAt
 
+# The multi-leg pools' betting percentages: how the T-pool money was spread
+# over the runners of each leg. This is the only source for them — a runners
+# payload's `betPercentages` carries the single-race pools and nothing else
+# (KAK, TRO, DUO, EKS, over the whole raw zone), so archive.bet_percentage has
+# never held a T-pool row. They come from /pool/{poolId}/odds, the same
+# endpoint as archive.odds_snapshot above, which returns one row per (leg,
+# runner) for a pool with legs instead of one per runner.
+#
+# `capturedAt` is deliberately *not* in the primary key, where odds_snapshot
+# has it. The win pool is crawled for its history — many snapshots of one pool
+# — while these are wanted final, one row per (pool, leg, runner): a re-fetch
+# of a pool crawled while betting was still open replaces its figures with the
+# closing ones rather than accumulating a second version beside them. The
+# figures freeze once a pool has run, and stay fetchable for years (verified
+# back to 2021-01-01), which is what makes this backfillable at all.
+#
+# netSales/netPool are pool-level and repeat on every row of the pool, as
+# poolType does on odds_snapshot. Aggregate them per pool, never over rows.
+CREATE_LEG_PERCENTAGE_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.leg_percentage(
+        poolId BIGINT,
+        poolType TEXT,           -- T4, T5, T64, T65, T75 (crawler.LEG_POOL_TYPES)
+        legNumber BIGINT,        -- 1..n within this pool
+        raceId BIGINT,
+        raceNumber BIGINT,
+        startNumber BIGINT,      -- the runner's start number (payload: runnerNumber)
+        runnerId BIGINT,         -- joins archive.start / archive.bet_percentage
+        percentage BIGINT,       -- hundredths of a percent; sums to ~10000 per leg
+        amount BIGINT,           -- money on this runner in this leg (payload `ticks` is its twin)
+        winProbable BIGINT,      -- the win-pool probable, hundredths
+        scratched BOOLEAN,       -- TRUE or NULL: the payload only ever sends the flag
+        capturedAt BIGINT,       -- payload `updated`
+        netSales BIGINT,         -- pool-level, repeated on every row of the pool
+        netPool BIGINT,          -- pool-level, likewise
+        PRIMARY KEY (poolId, legNumber, startNumber));
+"""
+INSERT_LEG_PERCENTAGE = ('INSERT OR REPLACE INTO archive.leg_percentage '
+                         'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+LEG_PERCENTAGE_KEY = (0, 2, 5)  # poolId, legNumber, startNumber
+
 # Career/season form and betting support ride along inside a runners payload,
 # but only while the card is current — both are empty for historical cards.
 CREATE_STAT_TABLE = """
@@ -1030,7 +1070,8 @@ def _insert_many(cur, statement, rows, key):
 def create(conn):
     conn.execute(CREATE_SCHEMA)
     for statement in (CREATE_CARD_TABLE, CREATE_RACE_TABLE, CREATE_HORSE_TABLE,
-                      CREATE_START_TABLE, CREATE_ODDS_TABLE, CREATE_STAT_TABLE,
+                      CREATE_START_TABLE, CREATE_ODDS_TABLE,
+                      CREATE_LEG_PERCENTAGE_TABLE, CREATE_STAT_TABLE,
                       CREATE_BETPERCENTAGE_TABLE, CREATE_PREVSTART_TABLE,
                       CREATE_HEPPA_EVENT_TABLE, CREATE_HEPPA_RACE_TABLE,
                       CREATE_HEPPA_START_TABLE, CREATE_HEPPA_HORSE_TABLE,
@@ -1064,6 +1105,9 @@ class ArchiveDb:
 
     def store_odds(self, rows):
         _insert_many(self.conn, INSERT_ODDS, rows, ODDS_KEY)
+
+    def store_leg_percentages(self, rows):
+        _insert_many(self.conn, INSERT_LEG_PERCENTAGE, rows, LEG_PERCENTAGE_KEY)
 
     def store_stats(self, rows):
         _insert_many(self.conn, INSERT_STAT, rows, STAT_KEY)

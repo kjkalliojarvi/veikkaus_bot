@@ -13,18 +13,35 @@ from datetime import date, datetime, timedelta
 import json
 
 from .archive_db import CREATE_SCHEMA, db_ops
-from .fetcher import CircuitOpen, Fetcher
+from .fetcher import CircuitOpen, Fetcher, read_raw
 
 
 # Stages order the work within one meet date: cards before races before the
 # per-race payloads. next_pending() sorts by (meetDate DESC, stage ASC).
-CARDS_DATE, RACES, RUNNERS, RESULTS, POOLS, ODDS = range(6)
+CARDS_DATE, RACES, RUNNERS, RESULTS, POOLS, ODDS, LEG_ODDS = range(7)
 
 # The manifest is shared with the Heppa crawl (heppa.py), which uses its own
 # endpoint types and its own stage range. next_pending() filters on these so a
 # run of one source never fetches the other's rows — different host, different
 # rate limit, different circuit breaker.
-VEIKKAUS_TYPES = ('cards_date', 'races', 'runners', 'results', 'pools', 'odds')
+VEIKKAUS_TYPES = ('cards_date', 'races', 'runners', 'results', 'pools', 'odds',
+                  'leg_odds')
+
+# The multi-leg pools' own opt-in, for the same reason the Heppa crawls have
+# theirs: `leg-percentages` is driven by what the raw zone already holds rather
+# than by a date window, so it must not drain a half-finished `backfill`.
+LEG_TYPES = ('leg_odds',)
+
+# The pool types whose odds payload is per (leg, runner) rather than per
+# runner — the T-pools, Toto4 through Toto86. Named explicitly rather than
+# derived: every pool of these types carries a `hasCombinations` field and no
+# single-race pool has one (verified over all 26,348 archived pools payloads:
+# present on 14,261 T-pool rows, absent on every VOI/SIJ/KAK/DUO/TRO/EKS one),
+# but it arrives *false* on 1,384 of them, so it is a live-state flag and not
+# an identity. `leg-percentages` reports a type carrying it that this tuple
+# does not name, which turns a new Veikkaus product into a printed line rather
+# than data silently missing. T86 has not been observed in the archive.
+LEG_POOL_TYPES = ('T4', 'T5', 'T64', 'T65', 'T75', 'T86')
 
 Task = namedtuple('Task', 'endpointType entityId url rawPath meetDate cardId stage')
 
@@ -196,10 +213,18 @@ def _race_task(kind: str, stage: int, meet_date: str, card_id: int, race_id: int
                 meet_date, card_id, stage)
 
 
-def _odds_task(meet_date: str, card_id: int, pool_id: int) -> Task:
-    return Task('odds', str(pool_id), f'/pool/{pool_id}/odds',
+def _pool_odds_task(kind: str, stage: int, meet_date: str, card_id: int,
+                    pool_id: int) -> Task:
+    """One pool's odds payload.
+
+    The same endpoint serves the win pool's per-runner odds and a multi-leg
+    pool's per-leg percentages; the endpoint type is what separates them, so
+    each can be crawled, limited and re-fetched on its own. Pool ids are unique
+    across types, so the two never collide on the manifest or in the raw zone.
+    """
+    return Task(kind, str(pool_id), f'/pool/{pool_id}/odds',
                 f'{meet_date}/card_{card_id}/pool_{pool_id}_odds.json.gz',
-                meet_date, card_id, ODDS)
+                meet_date, card_id, stage)
 
 
 def expand(task: Task, payload, country: str, with_odds: bool) -> list[Task]:
@@ -217,9 +242,23 @@ def expand(task: Task, payload, country: str, with_odds: bool) -> list[Task]:
                 children.append(_race_task('pools', POOLS, task.meetDate, task.cardId, race['raceId']))
         return children
     if task.endpointType == 'pools':
-        # Only the win pool carries a per-runner odd for every starter.
-        return [_odds_task(task.meetDate, task.cardId, p['poolId'])
-                for p in collection if p.get('poolType') == 'VOI']
+        # Only the win pool carries a per-runner odd for every starter; the
+        # multi-leg pools carry the per-leg betting percentages, which exist
+        # nowhere else in the API (see LEG_POOL_TYPES).
+        children = []
+        for pool in collection:
+            pool_type = pool.get('poolType')
+            if pool_type == 'VOI':
+                children.append(_pool_odds_task('odds', ODDS, task.meetDate,
+                                                task.cardId, pool['poolId']))
+            elif pool_type in LEG_POOL_TYPES:
+                # A multi-leg pool is listed by every one of its legs, so this
+                # enqueues it once per leg race. All the legs are on one card,
+                # so the duplicates agree on date and card, and INSERT OR
+                # IGNORE keeps the first.
+                children.append(_pool_odds_task('leg_odds', LEG_ODDS, task.meetDate,
+                                                task.cardId, pool['poolId']))
+        return children
     return []
 
 
@@ -295,6 +334,84 @@ def backfill(args):
             fetched = crawl(manifest, fetcher,
                             lambda t, p: expand(t, p, args.country, args.odds),
                             VEIKKAUS_TYPES, args.limit)
+            print(f'{fetched} responses fetched into {args.raw}.')
+        except CircuitOpen as e:
+            print(f'Crawl paused: {e}\nRerun the same command to resume.')
+        for row in manifest.counts():
+            print('  {:<12} {:<8} {}'.format(*row))
+
+
+def _leg_pool_tasks(manifest: Manifest, raw_root: str) -> tuple[list[Task], dict]:
+    """Every multi-leg pool the archived `pools` payloads name.
+
+    Driven by the raw zone rather than by a date window, because the pool ids
+    only exist inside those payloads and a `pools` task that is already `done`
+    is never fetched again — so the T-pool children `expand()` now emits were
+    never enqueued for a card crawled before this existed. Reading the archive
+    back is also the cheap way round: 26k local files against one request per
+    card, and the answer is the same.
+
+    Returns the tasks, plus a count per pool type that looks multi-leg but is
+    not in LEG_POOL_TYPES — see that tuple for why it is reported and not
+    guessed at.
+    """
+    tasks, seen, unknown = [], set(), {}
+    for task in manifest.done('pools'):
+        payload = read_raw(raw_root, task.rawPath)
+        if not isinstance(payload, dict):
+            continue
+        for pool in payload.get('collection', []):
+            pool_type, pool_id = pool.get('poolType'), pool.get('poolId')
+            # `seen` covers the reported types too, so both counts are per
+            # pool: a multi-leg pool is listed once per leg either way.
+            if pool_id is None or pool_id in seen:
+                continue
+            if pool_type in LEG_POOL_TYPES:
+                seen.add(pool_id)
+                tasks.append(_pool_odds_task('leg_odds', LEG_ODDS, task.meetDate,
+                                             task.cardId, pool_id))
+            elif pool.get('hasCombinations') is not None:
+                seen.add(pool_id)
+                unknown[pool_type] = unknown.get(pool_type, 0) + 1
+    return tasks, unknown
+
+
+def backfill_leg_percentages(args):
+    """CLI handler: crawl the multi-leg pools' per-leg betting percentages.
+
+    The one Veikkaus figure that is genuinely retrospective. Odds and betting
+    support otherwise have to be captured live — `stats` and `prevStarts` ride
+    along in a runners payload only while the card is current — but a T-pool's
+    odds payload keeps its closing percentages indefinitely, verified back to
+    the first day of the archive. So this needs no live cycle: it fetches
+    whatever the crawled `pools` payloads name and skips what it already has.
+
+    Driven by the archive, like the three Heppa crawls, so it follows a
+    `backfill --odds` run. Going forward `expand()` enqueues these itself, and
+    re-running this is a no-op over the pools already fetched.
+    """
+    fetcher = Fetcher(args.raw, args.delay)
+    with db_ops(args.db) as conn:
+        manifest = Manifest(conn)
+        manifest.create()
+        tasks, unknown = _leg_pool_tasks(manifest, args.raw)
+        if not tasks:
+            print('No multi-leg pools in the raw zone yet.\n'
+                  'They are named by the pools payloads, which only a '
+                  '`backfill --odds` run fetches.')
+            return
+        print(f'{len(tasks)} multi-leg pools known; already-fetched ones are skipped.')
+        for pool_type, count in sorted(unknown.items()):
+            print(f'  {count} {pool_type} pools look multi-leg (they carry '
+                  'hasCombinations) but are not in\n  crawler.LEG_POOL_TYPES, so '
+                  'nothing was fetched for them.')
+        manifest.enqueue(tasks)
+        refetch_window(args, manifest, LEG_TYPES)
+        if args.retry_failed:
+            print(f'{manifest.retry_failed(LEG_TYPES)} failed rows reset to pending.')
+        try:
+            # A pool's odds payload is a leaf: it has no children.
+            fetched = crawl(manifest, fetcher, lambda t, p: [], LEG_TYPES, args.limit)
             print(f'{fetched} responses fetched into {args.raw}.')
         except CircuitOpen as e:
             print(f'Crawl paused: {e}\nRerun the same command to resume.')

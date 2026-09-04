@@ -6,6 +6,7 @@ import sys
 
 from .archive_db import DEFAULT_DB
 from .crawler import backfill, status
+from .crawler import backfill_leg_percentages as leg_percentages
 from .crosscheck import crosscheck
 from .fetcher import DEFAULT_DELAY
 from .heppa import backfill as heppa_backfill
@@ -190,6 +191,31 @@ def veikkaus():
                                help='Reset failed manifest rows to pending before crawling')
     # No --create-db: driven by the horses already in the archive, as above.
     parser_hstats.set_defaults(func=heppa_stats)
+
+    parser_legperc = subparser.add_parser(
+        'leg-percentages',
+        help="Crawl the multi-leg pools' per-leg betting percentages (Toto4/5/64/65/75) "
+             "for every pool the archive knows about (run after `backfill --odds`)")
+    parser_legperc.add_argument('--raw', default=DEFAULT_RAW,
+                                help=f'Raw archive directory (default: {DEFAULT_RAW})')
+    parser_legperc.add_argument('--db', default=DEFAULT_DB,
+                                help=f'DuckDB database holding the manifest (default: {DEFAULT_DB})')
+    parser_legperc.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                                help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    parser_legperc.add_argument('--limit', type=int, default=None,
+                                help='Stop after N fetches (for a trial run)')
+    parser_legperc.add_argument('--retry-failed', action='store_true',
+                                help='Reset failed manifest rows to pending before crawling')
+    parser_legperc.add_argument('--refetch-from', dest='refetch_start', default=None,
+                                help='Reset already-fetched pools from this date (yyyy-mm-dd) to '
+                                     'pending — what to use for a pool crawled while betting '
+                                     'was still open, whose percentages were not final yet')
+    parser_legperc.add_argument('--refetch-to', dest='refetch_end', default=None,
+                                help='Last date of the refetch window (default: --refetch-from)')
+    # No --create-db: the pool ids come from the pools payloads already in the
+    # raw zone (crawler._leg_pool_tasks), so there is nothing this could do
+    # against a database it just made.
+    parser_legperc.set_defaults(func=leg_percentages)
 
     parser_parse = subparser.add_parser(
         'parse', help='Parse the raw archive into the archive.* tables')
