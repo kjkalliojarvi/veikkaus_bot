@@ -68,7 +68,7 @@ How the Toto4/5/64/65/75 money was spread over the runners of each leg — the c
 
 `percentage` is hundredths of a percent and sums to ~10000 within a leg; `amount` is the money on that runner in that leg. They land in `archive.leg_percentage`, which joins `archive.start` on either `runnerId` or `(raceId, startNumber)`.
 
-One caveat for modelling: **a scratched runner keeps the money bet on it before the withdrawal**, up to 62 % of a leg in one case, and that money still counts into the leg's ~10000. `scratched` marks those rows — the payload sends the flag only when it is set, so the column is TRUE or NULL and never FALSE — and it is the more current of the two scratched columns, since the Veikkaus runners payload behind `archive.start.scratched` is entry data and misses a horse withdrawn at the track.
+One caveat for modelling: **a scratched runner keeps the money bet on it before the withdrawal**, up to 72 % of a leg in one case, and that money still counts into the leg's ~10000. `scratched` marks those rows — the payload sends the flag only when it is set, so the column is TRUE or NULL and never FALSE — and it is the more current of the two scratched columns, since the Veikkaus runners payload behind `archive.start.scratched` is entry data and misses a horse withdrawn at the track.
 
 **This is the one Veikkaus figure that is genuinely retrospective.** `stats` and `prevStarts` ride along in a runners payload only while the card is current, and win odds have to be captured before post time — but a T-pool's odds payload keeps its closing percentages indefinitely. Verified against the first day of the archive: `/pool/7739521/odds` still returns all 81 rows of the Toto75 of 2021-01-02, seven legs, `netSales` 35,240,376, frozen at its final `updated`. So this needs no live cycle:
 
@@ -77,11 +77,38 @@ uv run veikkaus leg-percentages                   # ~3,180 requests, ~1.8 h
 uv run veikkaus leg-percentages --limit 20        # a few pools, to try it
 ```
 
-It reads the pool ids out of the `pools` payloads already in `data/raw/` and skips what it already has, so re-running it costs only the new ones. The full crawl was **3,182 pools with no failures — 178,175 rows over 12,906 races and 146,320 runners, 2021-01-01 to 2026-08-11**: T4 1,339 pools, T5 1,131, T75 365, T65 337, T64 9. None of the 15,642 legs sums outside 9,990–10,010 hundredths, and 178,160 of the rows join `archive.start` (the 15 that do not are vacated start numbers — scratched, 0 %, no horse). A runner can appear in two or three pools, since one race is often a leg of both the T4 and the T5.
+It reads the pool ids out of the `pools` payloads already in `data/raw/` and skips what it already has, so re-running it costs only the new ones. The full crawl was **3,182 pools with no failures — 178,175 rows, 2021-01-01 to 2026-08-11**. After the never-run legs are dropped (below) the table holds **176,402 rows over 3,148 pools, 12,906 races and 146,320 runners**: T4 1,327 pools, T5 1,114, T75 362, T65 336, T64 9. None of the 15,482 legs sums outside 9,990–10,010 hundredths, and all but 15 rows join `archive.start` (those 15 are vacated start numbers — scratched, 0 %, no horse). A runner can appear in two or three pools, since one race is often a leg of both the T4 and the T5.
 
 **One caveat beyond the scratched money:** 72 pools sit on the combination-pool meta-cards (`MM` 64, `Sl` 7, `T75` 1). Those pools are real — a Magic Monday T4 is a genuine cross-track pool, verified leg by leg against the Oulu and Teivo races it draws on — but a meta-card re-lists races that also run under their real track, so those 3,975 rows carry the meta-card's copy of `raceId`/`startNumber`. Exclude `trackNumber` 48/88 when grouping by card, exactly as the start-interval recompute does. Going forward `backfill --odds` enqueues them itself and this command is only needed to catch up the cards crawled before it existed.
 
 Two things worth knowing. A pool crawled *while betting was still open* stores percentages that are not final, and `--refetch-from` is what fixes that: `capturedAt` is deliberately not part of the primary key, so the re-fetch replaces the row rather than adding a second version beside it. And `LEG_POOL_TYPES` names the multi-leg types explicitly — every one of them carries a `hasCombinations` field and no single-race pool does, but it arrives `false` on 1,384 of the archived pools, which makes it a live-state flag rather than an identity. A type carrying it that the tuple does not name is reported by the command instead of being silently skipped.
+
+#### What won
+
+`placement` on each row is what that runner did, stamped by `parse` rather than joined at query time (`ArchiveDb.recompute_leg_placements()`). So the question the percentages exist for is a `GROUP BY`:
+
+```sql
+SELECT poolType,
+       count(*) FILTER (WHERE placement = 1)                    AS wins,
+       round(avg(percentage) FILTER (WHERE placement = 1)/100, 2) AS mean_winner_pct
+FROM archive.leg_percentage
+GROUP BY 1;
+```
+
+It holds the order **the pool paid out on** (`archive.start.placement`, Veikkaus-first through the merge), which is the right order for a betting question; the official post-protest order is in `heppa_start.placement` and differs on 16 races. Two thirds of the placements come from Heppa, because 56 % of leg rows finished 4th or worse and Veikkaus publishes only the paid places.
+
+**Every leg in the table has a winner** — that invariant is bought by dropping the legs whose race never ran: 1,773 rows over 33 whole pools, 28 meetings Heppa flags `canceled` plus one card abandoned after race 3 (Lahti 2023-11-02, −2 °C). Not one `prev_start` row names those meetings, against 208 for the days before them, and `raceStatus` is no help — it reads `OFFICIAL` on all 262 of their races. Nothing is lost: the raw payloads stay, `parse --full` re-inserts them, and the rule re-runs every parse.
+
+Count winners with `FILTER (WHERE placement = 1)` and **do not assume one per leg**: 18 legs are dead heats. Oulu 2021-02-06 race 9 has two horses `placingRaw '1'` in both sources and nothing placed second.
+
+The money turns out to know what it is doing. By percentage bucket, the observed win rate:
+
+| bucket | <2% | 2–5% | 5–10% | 10–20% | 20–30% | 30–50% | ≥50% |
+|---|---|---|---|---|---|---|---|
+| runners | 52,335 | 27,550 | 21,519 | 22,290 | 12,062 | 8,074 | 3,268 |
+| win rate | 1.0 % | 3.9 % | 7.9 % | 15.2 % | 26.6 % | 42.5 % | 66.3 % |
+
+The leg favourite wins 41.3 % of the time, and the average winner carried 26.8 % of its leg.
 
 ### The Heppa half
 
@@ -196,7 +223,7 @@ Everything lands in the `archive` schema of a DuckDB file:
 | `stat` | (runner, period) — career/season form, current cards only |
 | `bet_percentage` | (runner, pool type) — the single-race pools only: KAK, TRO, DUO, EKS |
 | `odds_snapshot` | (pool, runner, capture time) |
-| `leg_percentage` | (pool, leg, runner) |
+| `leg_percentage` | (pool, leg, runner) — T-pool betting percentages, with what each runner did |
 | `heppa_event` | race meeting in the Heppa registry, incl. track condition and temperature |
 | `heppa_race` | race in the Heppa registry |
 | `heppa_start` | (race, horse) as the registry recorded it — the whole field at every Finnish meeting, plus Finnish horses' starts abroad, told apart by `finnishTrack`; incl. `startInterval` |

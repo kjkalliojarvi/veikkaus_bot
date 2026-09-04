@@ -853,6 +853,11 @@ def _store_leg_percentages(manifest: Manifest, raw_root: str, db: ArchiveDb,
     look up in the pools listing. `capturedAt` is not in the primary key here
     either, so an old payload with no `updated` field is a NULL rather than
     something to reconstruct — see archive_db.CREATE_LEG_PERCENTAGE_TABLE.
+
+    The last column is left NULL and recomputed after loading
+    (archive_db.RECOMPUTE_LEG_PLACEMENT), as `start_record()` does with its own
+    derived columns: writing it NULL on every parse is what stops a re-crawl
+    leaving a stale placement behind.
     """
     consumed, rows = [], []
     count = 0
@@ -886,7 +891,8 @@ def _store_leg_percentages(manifest: Manifest, raw_root: str, db: ArchiveDb,
                          odd.get('scratched'),
                          payload.get('updated'),
                          payload.get('netSales'),
-                         payload.get('netPool')))
+                         payload.get('netPool'),
+                         None))   # placement — from archive.start, after loading
         count += 1
         _flush(db.store_leg_percentages, rows)
     _flush(db.store_leg_percentages, rows, force=True)
@@ -1172,6 +1178,12 @@ def parse_all(db_name: str, raw_root: str, country: str, full: bool = False) -> 
         # that reads it.
         db.recompute_heppa_links()
         db.recompute_start_from_heppa()
+        # After that merge, not before: it is what puts Heppa's whole field
+        # into archive.start.placement, and 56% of the leg rows finished 4th
+        # or worse, which Veikkaus never publishes.
+        dropped = db.recompute_leg_placements()
+        if dropped:
+            print(f'{dropped} leg-percentage rows dropped: races that never ran.')
         # Last, because it reads canonicalKey and heppa_start.horseKey, which
         # recompute_heppa_links() above is what fills in.
         db.recompute_cross_source_intervals()
