@@ -141,6 +141,47 @@ CREATE_ODDS_TABLE = """
 INSERT_ODDS = 'INSERT OR REPLACE INTO archive.odds_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?);'
 ODDS_KEY = (0, 2, 3)  # poolId, startNumber, capturedAt
 
+# The multi-leg pools' betting percentages: how the T-pool money was spread
+# over the runners of each leg. This is the only source for them — a runners
+# payload's `betPercentages` carries the single-race pools and nothing else
+# (KAK, TRO, DUO, EKS, over the whole raw zone), so archive.bet_percentage has
+# never held a T-pool row. They come from /pool/{poolId}/odds, the same
+# endpoint as archive.odds_snapshot above, which returns one row per (leg,
+# runner) for a pool with legs instead of one per runner.
+#
+# `capturedAt` is deliberately *not* in the primary key, where odds_snapshot
+# has it. The win pool is crawled for its history — many snapshots of one pool
+# — while these are wanted final, one row per (pool, leg, runner): a re-fetch
+# of a pool crawled while betting was still open replaces its figures with the
+# closing ones rather than accumulating a second version beside them. The
+# figures freeze once a pool has run, and stay fetchable for years (verified
+# back to 2021-01-01), which is what makes this backfillable at all.
+#
+# netSales/netPool are pool-level and repeat on every row of the pool, as
+# poolType does on odds_snapshot. Aggregate them per pool, never over rows.
+CREATE_LEG_PERCENTAGE_TABLE = """
+    CREATE TABLE IF NOT EXISTS archive.leg_percentage(
+        poolId BIGINT,
+        poolType TEXT,           -- T4, T5, T64, T65, T75 (crawler.LEG_POOL_TYPES)
+        legNumber BIGINT,        -- 1..n within this pool
+        raceId BIGINT,
+        raceNumber BIGINT,
+        startNumber BIGINT,      -- the runner's start number (payload: runnerNumber)
+        runnerId BIGINT,         -- joins archive.start / archive.bet_percentage
+        percentage BIGINT,       -- hundredths of a percent; sums to ~10000 per leg
+        amount BIGINT,           -- money on this runner in this leg (payload `ticks` is its twin)
+        winProbable BIGINT,      -- the win-pool probable, hundredths
+        scratched BOOLEAN,       -- TRUE or NULL: the payload only ever sends the flag
+        capturedAt BIGINT,       -- payload `updated`
+        netSales BIGINT,         -- pool-level, repeated on every row of the pool
+        netPool BIGINT,          -- pool-level, likewise
+        placement BIGINT,        -- what this runner did: recomputed after loading
+        PRIMARY KEY (poolId, legNumber, startNumber));
+"""
+INSERT_LEG_PERCENTAGE = ('INSERT OR REPLACE INTO archive.leg_percentage '
+                         'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);')
+LEG_PERCENTAGE_KEY = (0, 2, 5)  # poolId, legNumber, startNumber
+
 # Career/season form and betting support ride along inside a runners payload,
 # but only while the card is current — both are empty for historical cards.
 CREATE_STAT_TABLE = """
@@ -492,6 +533,63 @@ RECOMPUTE_PREV_START_COACH = """
     WHERE c.horseKey = p.horseKey
       AND c.meetDate = p.meetDate
       AND c.raceNumber = p.raceNumber;
+"""
+
+# What each T-pool leg runner actually did, stamped onto archive.leg_percentage
+# after loading. The percentages say where the money went; without this the
+# question they exist to answer — how did the money do — needs a join every
+# time, and that join has a trap: a window function placed after the winner
+# filter sees a one-row partition and calls every winner the favourite.
+#
+# `archive.start.placement` is the order the pool *paid out on*, which is the
+# right order for a betting question. Veikkaus wins the merge's coalesce, so
+# on the 16 races where a post-race disqualification moved the official result
+# this holds the payout order; heppa_start.placement holds the corrected one.
+#
+# It joins on (raceId, startNumber) rather than through the Heppa bridge, and
+# that is what keeps the 72 meta-card pools working: a meta-card has no Heppa
+# event by design, yet all 370 of its legs have a placement here.
+#
+# The reset is not optional. Without it a re-crawl that removes a result would
+# leave the old placement behind, the same reason start_record() writes its
+# derived columns NULL on every parse.
+RESET_LEG_PLACEMENT = 'UPDATE archive.leg_percentage SET placement = NULL;'
+
+RECOMPUTE_LEG_PLACEMENT = """
+    UPDATE archive.leg_percentage AS lp
+    SET placement = s.placement
+    FROM archive.start AS s
+    WHERE s.raceId = lp.raceId
+      AND s.startNumber = lp.startNumber;
+"""
+
+# A leg no runner of which was placed first is a race that never ran: 139 of
+# the 144 such races sit on 28 meetings Heppa flags `canceled`, and the other
+# five are one card abandoned after race 3 (Lahti 2023-11-02, -2 C). Verified
+# independently — not one prev_start row names those (date, track) pairs,
+# against 208 for the days before them — and note archive.race.raceStatus is
+# no help, reading OFFICIAL on all 262 races of the canceled cards.
+#
+# Dropping them leaves the invariant every statistic wants: every leg in this
+# table has a winner. It removed 1,773 rows over 33 pools, every one of those
+# pools whole.
+#
+# Leg grain, not pool grain, even though nothing in the archive straddles yet:
+# a meeting abandoned mid-card could leave a pool with some legs run and some
+# not, and dropping only the unrun ones is right there — percentages are per
+# leg, so each surviving leg still sums to ~10000. Such a pool would then show
+# fewer legs than its product name implies.
+#
+# Nothing is lost, and that is what makes a delete acceptable here: the raw
+# payloads stay in the raw zone, `parse --full` re-inserts every dropped row,
+# and this rule re-runs on every parse. So a card crawled before its results
+# were published — what the two-day --to lag exists to prevent — is recovered
+# rather than lost.
+DROP_UNRUN_LEGS = """
+    DELETE FROM archive.leg_percentage
+    WHERE (poolId, legNumber) IN (
+        SELECT poolId, legNumber FROM archive.leg_percentage
+        GROUP BY 1, 2 HAVING count(*) FILTER (WHERE placement = 1) = 0);
 """
 
 # Days since the horse's previous start, filled in after loading rather than
@@ -914,6 +1012,7 @@ ADD_COLUMNS = (
     'ALTER TABLE archive.start ADD COLUMN IF NOT EXISTS startInterval BIGINT;',
     'ALTER TABLE archive.heppa_start ADD COLUMN IF NOT EXISTS startInterval BIGINT;',
     'ALTER TABLE archive.heppa_start ADD COLUMN IF NOT EXISTS finnishTrack BOOLEAN;',
+    'ALTER TABLE archive.leg_percentage ADD COLUMN IF NOT EXISTS placement BIGINT;',
 )
 
 
@@ -1030,7 +1129,8 @@ def _insert_many(cur, statement, rows, key):
 def create(conn):
     conn.execute(CREATE_SCHEMA)
     for statement in (CREATE_CARD_TABLE, CREATE_RACE_TABLE, CREATE_HORSE_TABLE,
-                      CREATE_START_TABLE, CREATE_ODDS_TABLE, CREATE_STAT_TABLE,
+                      CREATE_START_TABLE, CREATE_ODDS_TABLE,
+                      CREATE_LEG_PERCENTAGE_TABLE, CREATE_STAT_TABLE,
                       CREATE_BETPERCENTAGE_TABLE, CREATE_PREVSTART_TABLE,
                       CREATE_HEPPA_EVENT_TABLE, CREATE_HEPPA_RACE_TABLE,
                       CREATE_HEPPA_START_TABLE, CREATE_HEPPA_HORSE_TABLE,
@@ -1065,6 +1165,9 @@ class ArchiveDb:
     def store_odds(self, rows):
         _insert_many(self.conn, INSERT_ODDS, rows, ODDS_KEY)
 
+    def store_leg_percentages(self, rows):
+        _insert_many(self.conn, INSERT_LEG_PERCENTAGE, rows, LEG_PERCENTAGE_KEY)
+
     def store_stats(self, rows):
         _insert_many(self.conn, INSERT_STAT, rows, STAT_KEY)
 
@@ -1094,6 +1197,25 @@ class ArchiveDb:
 
     def recompute_prev_start_coaches(self):
         self.conn.execute(RECOMPUTE_PREV_START_COACH)
+
+    def recompute_leg_placements(self) -> int:
+        """Stamp each T-pool leg runner's finish, and drop the legs that never ran.
+
+        Must run after recompute_start_from_heppa(): that merge is what puts
+        the whole field into archive.start.placement, and two thirds of the
+        placements here come from Heppa — 56% of leg rows finished 4th or
+        worse, which Veikkaus never publishes. Run it before the merge and the
+        column is 1st-to-3rd only.
+
+        Returns the number of rows dropped, which the caller prints: a silent
+        delete is exactly what would read as data having gone missing.
+        """
+        self.conn.execute(RESET_LEG_PLACEMENT)
+        self.conn.execute(RECOMPUTE_LEG_PLACEMENT)
+        before = self.conn.execute('SELECT count(*) FROM archive.leg_percentage').fetchone()[0]
+        self.conn.execute(DROP_UNRUN_LEGS)
+        after = self.conn.execute('SELECT count(*) FROM archive.leg_percentage').fetchone()[0]
+        return before - after
 
     def recompute_auto_starts(self):
         self.conn.execute(RECOMPUTE_START_AUTOSTART)

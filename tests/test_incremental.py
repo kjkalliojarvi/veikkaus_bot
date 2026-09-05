@@ -13,8 +13,9 @@ import duckdb
 import pytest
 
 from veikkaus_bot import parse as P
-from veikkaus_bot.crawler import (Manifest, VEIKKAUS_TYPES, cards_task, dates,
-                                  expand)
+from veikkaus_bot.archive_db import ArchiveDb
+from veikkaus_bot.crawler import (LEG_ODDS, Manifest, VEIKKAUS_TYPES,
+                                  _pool_odds_task, cards_task, dates, expand)
 from veikkaus_bot.heppa import (HEPPA_TYPES, _foreign_races_task, horse_task,
                                 results_task)
 from veikkaus_bot.heppa import expand as heppa_expand
@@ -300,3 +301,165 @@ def test_a_second_parse_does_not_re_add_the_meeting_abroad(archive):
     prepared = with_foreign_meeting(archive)
     assert run(prepared)['heppa starts'] == 5
     assert run(prepared)['heppa starts'] == 0
+
+
+# One T5 pool, two legs' worth of runners, shaped exactly as the live payload:
+# `ticks` twins `amount`, `scratched` is present on some rows and not others,
+# and the last row has no legNumber at all.
+LEG_POOL_ID = 55
+LEG_ODDS_PAYLOAD = {
+    'poolId': LEG_POOL_ID, 'poolType': 'T5', 'netSales': 930125, 'netPool': 604580,
+    'updated': 1788429164129,
+    'odds': [
+        {'legNumber': 1, 'raceNumber': 1, 'raceId': RACE_ID, 'runnerNumber': 9,
+         'runnerId': 109, 'percentage': 3056, 'amount': 284265, 'ticks': 284265,
+         'winProbable': 289},
+        {'legNumber': 1, 'raceNumber': 1, 'raceId': RACE_ID, 'runnerNumber': 7,
+         'runnerId': 107, 'percentage': 426, 'amount': 39620, 'ticks': 39620,
+         'winProbable': 1762, 'scratched': True},
+        {'legNumber': 2, 'raceNumber': 2, 'raceId': RACE_ID + 1, 'runnerNumber': 9,
+         'runnerId': 209, 'percentage': 1676, 'amount': 155922, 'ticks': 155922,
+         'winProbable': 1385},
+        {'raceNumber': 2, 'raceId': RACE_ID + 1, 'runnerNumber': 8, 'percentage': 79}]}
+
+
+def with_leg_pool(archive, payload=None):
+    """Add one crawled multi-leg pool to the fixture's raw zone."""
+    raw, db = archive
+    conn = duckdb.connect(db)
+    manifest = Manifest(conn)
+    task = _pool_odds_task('leg_odds', LEG_ODDS, MEET, CARD_ID, LEG_POOL_ID)
+    manifest.enqueue([task])
+    store(pathlib.Path(raw), task.rawPath,
+          LEG_ODDS_PAYLOAD if payload is None else payload)
+    manifest.mark(task, 'done', 200, None)
+    conn.close()
+    return raw, db
+
+
+def leg_rows(db):
+    conn = duckdb.connect(db)
+    rows = conn.execute("""SELECT legNumber, startNumber, percentage, amount, scratched,
+                                  capturedAt, netSales, poolType, placement
+                           FROM archive.leg_percentage ORDER BY legNumber, startNumber"""
+                        ).fetchall()
+    conn.close()
+    return rows
+
+
+def test_a_crawled_multi_leg_pool_reaches_the_leg_percentage_table(archive):
+    """Two of the payload's four rows survive, for two different reasons.
+
+    The fourth has no legNumber, which is in the primary key, so the parse
+    drops it at the door. Leg 2 names a race the fixture does not have, so it
+    has no winner and the recompute drops it — see the straddle test below.
+    What is left is leg 1, stamped with what its runners did: the card's
+    toteResultString is '9-7-8', so 9 won and 7 was second.
+    """
+    counts = run(with_leg_pool(archive))
+    assert counts['multi-leg pools'] == 1
+    assert leg_rows(archive[1]) == [
+        (1, 7, 426, 39620, True, 1788429164129, 930125, 'T5', 2),
+        (1, 9, 3056, 284265, None, 1788429164129, 930125, 'T5', 1)]
+
+
+def test_a_second_parse_does_not_re_add_the_multi_leg_pool(archive):
+    prepared = with_leg_pool(archive)
+    run(prepared)
+    before = leg_rows(prepared[1])
+    assert run(prepared)['multi-leg pools'] == 0
+    assert leg_rows(prepared[1]) == before
+
+
+def test_a_refetched_pool_replaces_its_figures_rather_than_adding_a_version(archive):
+    """Why capturedAt is not in the primary key, unlike odds_snapshot's.
+
+    A pool crawled while betting was still open holds percentages that are not
+    final; --refetch-from is what fixes that, and it has to *replace* them —
+    one row per (pool, leg, runner), holding the closing figures.
+    """
+    prepared = with_leg_pool(archive)
+    run(prepared)
+    closing = {**LEG_ODDS_PAYLOAD, 'updated': LEG_ODDS_PAYLOAD['updated'] + 60_000,
+               'odds': [{**LEG_ODDS_PAYLOAD['odds'][0], 'percentage': 2900}]}
+    with_leg_pool(prepared, closing)
+    assert run(prepared)['multi-leg pools'] == 1
+    assert leg_rows(prepared[1]) == [
+        (1, 7, 426, 39620, True, 1788429164129, 930125, 'T5', 2),
+        (1, 9, 2900, 284265, None, 1788429164129 + 60_000, 930125, 'T5', 1)]
+
+
+def test_a_leg_whose_race_never_ran_is_dropped_and_its_sibling_survives(archive):
+    """The canceled meeting, at leg grain.
+
+    A leg no runner of which was placed first is a race that never ran — 139 of
+    the archive's 144 such races are on meetings Heppa flags `canceled`, the
+    other five are one card abandoned partway. Dropping them leaves the
+    invariant every statistic wants: every leg in the table has a winner.
+
+    Leg grain matters even though no pool in the archive straddles yet: here
+    leg 1 ran and leg 2 did not, and the pool keeps the leg that ran.
+    """
+    run(with_leg_pool(archive))
+    conn = duckdb.connect(archive[1])
+    assert conn.execute(
+        'SELECT DISTINCT legNumber FROM archive.leg_percentage').fetchall() == [(1,)]
+    # The invariant, stated the way a statistics query would rely on it.
+    assert conn.execute("""SELECT count(*) FROM (
+        SELECT poolId, legNumber FROM archive.leg_percentage
+        GROUP BY 1, 2 HAVING count(*) FILTER (WHERE placement = 1) = 0)""").fetchone()[0] == 0
+    conn.close()
+
+
+def test_the_drop_does_not_run_away_on_a_second_parse(archive):
+    """The failure mode a delete introduces: parse twice, lose more each time."""
+    prepared = with_leg_pool(archive)
+    run(prepared)
+    before = leg_rows(prepared[1])
+    run(prepared)
+    assert leg_rows(prepared[1]) == before
+
+
+def test_a_dropped_leg_comes_back_when_its_result_does(archive):
+    """What makes the delete safe rather than a one-way door.
+
+    The raw payloads are untouched, so `parse --full` re-inserts every dropped
+    row and the rule is re-evaluated against whatever results exist by then —
+    the recovery for a card crawled before its results were published.
+    """
+    raw, db = with_leg_pool(archive)
+    run((raw, db))
+    assert [r[0] for r in leg_rows(db)] == [1, 1]
+
+    # The missing race arrives: leg 2's race, with its own field and result.
+    conn = duckdb.connect(db)
+    conn.execute("INSERT INTO archive.race (raceId, cardId, number, toteResultString) "
+                 "VALUES (?, ?, 2, '9-8-7')", (RACE_ID + 1, CARD_ID))
+    conn.execute('INSERT INTO archive.start (raceId, startNumber, placement) VALUES (?, 9, 1)',
+                 (RACE_ID + 1,))
+    conn.close()
+
+    run((raw, db), full=True)
+    assert [(r[0], r[1], r[8]) for r in leg_rows(db)] == [(1, 7, 2), (1, 9, 1), (2, 9, 1)]
+
+
+def test_a_dead_heat_puts_two_winners_in_one_leg(archive):
+    """18 legs of the archive hold two `placement = 1` rows.
+
+    Oulu 2021-02-06 race 9 is the shape of it, and both sources agree: Jamir
+    and Evartti are `placingRaw '1'`, and nothing is placed second. So a
+    statistics query counts winners with a FILTER and must accept more than one
+    per leg rather than joining on the assumption of exactly one.
+    """
+    raw, db = with_leg_pool(archive)
+    run((raw, db))
+    conn = duckdb.connect(db)
+    # Straight to the recompute rather than through a parse: a full re-parse
+    # would rebuild archive.start from the runners payload and undo this.
+    conn.execute('UPDATE archive.start SET placement = 1 WHERE raceId = ? AND startNumber = 7',
+                 (RACE_ID,))
+    assert ArchiveDb(conn).recompute_leg_placements() == 0
+    rows = conn.execute('SELECT startNumber, placement FROM archive.leg_percentage '
+                        'ORDER BY startNumber').fetchall()
+    conn.close()
+    assert rows == [(7, 1), (9, 1)]

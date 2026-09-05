@@ -1,10 +1,13 @@
 from datetime import date
+import gzip
+import json
 
 import duckdb
 import pytest
 
-from veikkaus_bot.crawler import (CARDS_DATE, Manifest, RACES, RUNNERS, Task,
-                                  cards_task, dates, expand)
+from veikkaus_bot.crawler import (CARDS_DATE, LEG_ODDS, Manifest, ODDS, POOLS,
+                                  RACES, RUNNERS, Task, _leg_pool_tasks,
+                                  _pool_odds_task, cards_task, dates, expand)
 
 
 @pytest.fixture
@@ -105,3 +108,55 @@ def test_a_sigterm_leaves_quietly_rather_than_raising_in_the_handler():
         sigterm_exit(None)                          # as the dispatch tail calls it
     with pytest.raises(SystemExit):
         sigterm_exit()
+
+
+def test_expand_pools_follows_the_win_pool_and_the_multi_leg_ones():
+    task = Task('pools', '7', '/race/7/pools', 'p', '2026-08-09', 1, POOLS)
+    payload = {'collection': [{'poolId': 10, 'poolType': 'VOI'},
+                              {'poolId': 11, 'poolType': 'KAK'},
+                              {'poolId': 12, 'poolType': 'T5', 'hasCombinations': True},
+                              {'poolId': 13, 'poolType': 'T75', 'hasCombinations': False}]}
+    children = expand(task, payload, 'FI', with_odds=True)
+    assert [(c.endpointType, c.entityId) for c in children] == [
+        ('odds', '10'), ('leg_odds', '12'), ('leg_odds', '13')]
+    # hasCombinations arrives false on a pool whose combinations are not
+    # published yet, which says nothing about whether it has legs.
+    assert children[2].stage == LEG_ODDS
+
+
+def test_the_two_pool_odds_kinds_share_a_url_and_differ_in_type():
+    win = _pool_odds_task('odds', ODDS, '2026-08-09', 1, 10)
+    leg = _pool_odds_task('leg_odds', LEG_ODDS, '2026-08-09', 1, 12)
+    assert win.url == '/pool/10/odds' and leg.url == '/pool/12/odds'
+    assert leg.rawPath == '2026-08-09/card_1/pool_12_odds.json.gz'
+    assert (win.endpointType, leg.endpointType) == ('odds', 'leg_odds')
+
+
+def _store_pools(raw_root, raw_path, payload):
+    full = raw_root / raw_path
+    full.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(full, 'wt', encoding='utf-8') as f:
+        json.dump(payload, f)
+
+
+def test_leg_pool_tasks_names_each_pool_once_and_reports_the_unknown(manifest, tmp_path):
+    """A multi-leg pool is listed by every leg, so it arrives once per race."""
+    pools = {'collection': [{'poolId': 10, 'poolType': 'VOI'},
+                            {'poolId': 12, 'poolType': 'T5', 'hasCombinations': True},
+                            {'poolId': 14, 'poolType': 'T9', 'hasCombinations': True}]}
+    tasks = []
+    for race_id in (7, 8):
+        task = Task('pools', str(race_id), f'/race/{race_id}/pools',
+                    f'2026-08-09/card_1/race_{race_id}_pools.json.gz', '2026-08-09', 1, POOLS)
+        _store_pools(tmp_path, task.rawPath, pools)
+        tasks.append(task)
+    manifest.enqueue(tasks)
+    for task in tasks:
+        manifest.mark(task, 'done', 200, None)
+
+    found, unknown = _leg_pool_tasks(manifest, str(tmp_path))
+    assert [t.entityId for t in found] == ['12']
+    # A pool type carrying hasCombinations that LEG_POOL_TYPES does not name is
+    # reported rather than fetched — a new Veikkaus product, not a guess. One
+    # pool, counted once, though both legs listed it.
+    assert unknown == {'T9': 1}
