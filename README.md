@@ -79,7 +79,7 @@ uv run veikkaus leg-percentages --limit 20        # a few pools, to try it
 
 It reads the pool ids out of the `pools` payloads already in `data/raw/` and skips what it already has, so re-running it costs only the new ones. The full crawl was **3,182 pools with no failures — 178,175 rows, 2021-01-01 to 2026-08-11**. After the never-run legs are dropped (below) the table holds **176,402 rows over 3,148 pools, 12,906 races and 146,320 runners**: T4 1,327 pools, T5 1,114, T75 362, T65 336, T64 9. None of the 15,482 legs sums outside 9,990–10,010 hundredths, and all but 15 rows join `archive.start` (those 15 are vacated start numbers — scratched, 0 %, no horse). A runner can appear in two or three pools, since one race is often a leg of both the T4 and the T5.
 
-**One caveat beyond the scratched money:** 72 pools sit on the combination-pool meta-cards (`MM` 64, `Sl` 7, `T75` 1). Those pools are real — a Magic Monday T4 is a genuine cross-track pool, verified leg by leg against the Oulu and Teivo races it draws on — but a meta-card re-lists races that also run under their real track, so those 3,975 rows carry the meta-card's copy of `raceId`/`startNumber`. Exclude `trackNumber` 48/88 when grouping by card, exactly as the start-interval recompute does. Going forward `backfill --odds` enqueues them itself and this command is only needed to catch up the cards crawled before it existed.
+**One caveat beyond the scratched money:** 72 pools sit on the combination-pool meta-cards (`MM` 64, `Sl` 7, `T75` 1). Those pools are real — a Magic Monday T4 is a genuine cross-track pool, verified leg by leg against the Oulu and Teivo races it draws on — but a meta-card re-lists races that also run under their real track, so those 3,975 rows carry the meta-card's copy of `raceId`/`startNumber`. Exclude `trackNumber` 48/88 when grouping by card, exactly as the start-interval recompute does. Going forward `backfill --odds` enqueues them itself and this command is only needed to catch up the cards crawled before it existed — which is why it still sits in the recommended cycle under [Keeping the archive up to date](#keeping-the-archive-up-to-date), as a safety net rather than as the mechanism.
 
 Two things worth knowing. A pool crawled *while betting was still open* stores percentages that are not final, and `--refetch-from` is what fixes that: `capturedAt` is deliberately not part of the primary key, so the re-fetch replaces the row rather than adding a second version beside it. And `LEG_POOL_TYPES` names the multi-leg types explicitly — every one of them carries a `hasCombinations` field and no single-race pool does, but it arrives `false` on 1,384 of the archived pools, which makes it a live-state flag rather than an identity. A type carrying it that the tuple does not name is reported by the command instead of being silently skipped.
 
@@ -168,12 +168,31 @@ Both crawls are resumable and skip what they already have, so the recommended cy
 
 ```bash
 LAST=$(date -v-2d +%F)                                  # BSD/macOS date; GNU: date -d '2 days ago' +%F
-uv run veikkaus backfill --from 2021-01-01 --to "$LAST"
+uv run veikkaus backfill --from 2021-01-01 --to "$LAST" --odds
 uv run veikkaus heppa    --from 2021-01-01 --to "$LAST"
 uv run veikkaus heppa-horses
 uv run veikkaus heppa-foreign
+uv run veikkaus leg-percentages
 uv run veikkaus parse
 ```
+
+**`--odds` belongs in the cycle, and it is the half that cannot be caught up
+later.** It crawls each race's pools and then both kinds of child: the win pool's
+per-runner odds, and the T-pools' per-leg betting percentages. Leave it off and
+that day's win odds are gone — the win pool is a pre-post-time snapshot and no
+endpoint will sell it back to you afterwards, so `start.winOddsFinal` falls back
+to the results payload, which prices the paid places and nobody else. The T-pool
+percentages are the exception: they stay fetchable for years, which is what the
+next command is for.
+
+**`leg-percentages` is the safety net, not the mechanism.** Under `--odds`,
+`expand()` already enqueues a `leg_odds` task for every T-pool it sees, so on a
+cycle that has always run with `--odds` this command fetches **nothing**. It
+earns its place by finding the pools `--odds` never enqueued — a `pools` payload
+archived before that branch existed is `done` for good, so nothing else will ever
+look inside it again. It reads the pool ids straight out of the raw zone for
+exactly that reason, which is also why it needs no `parse` in front of it, unlike
+the two archive-driven commands above.
 
 Already-crawled dates cost nothing, so there is no date arithmetic to get wrong on `--from`. **`--to` is the parameter that matters, and it must never reach a day whose racing is not yet final.**
 
@@ -183,7 +202,9 @@ Heppa is more forgiving, and is the safety net. Its month-listing task id contai
 
 **Why `heppa-horses` and `heppa-foreign` come before `parse`.** Both are driven by the archive rather than by a date window — the first reads horse ids out of `archive.heppa_start`, the second reads meetings out of `archive.prev_start` — so both see the *previous* cycle's parse. Putting them there means new horses and newly-discovered meetings lag by one cycle and you pay for one parse instead of two, which is the right trade for a scheduled job. The parse at the end is what loads what they fetched.
 
-**Cost.** The whole cycle is a few hundred requests and a `parse` measured in seconds: **`parse` only loads payloads fetched since it last ran.** A settled archive parses in under a second. Use `parse --full` after changing any parser — the manifest records what has been loaded, not what the parser would now produce.
+**Cost.** The whole cycle is a few hundred requests — roughly double with `--odds`, which adds a pools fetch per race plus one per win pool and T-pool — and a `parse` measured in seconds: **`parse` only loads payloads fetched since it last ran.** A settled archive parses in under a second. Use `parse --full` after changing any parser — the manifest records what has been loaded, not what the parser would now produce.
+
+The one line that costs more than it looks is `leg-percentages`, and the cost is local rather than remote: it reads back **every** archived `pools` payload to rediscover the pool ids, 26,378 gzipped files today. Measured on a settled archive, where it then fetches nothing: **5.7 s with a warm page cache, 101 s cold.** If that is too much for a nightly job, it is the one command here that is safe to run weekly instead — the percentages it recovers are not going anywhere.
 
 **If a date does get crawled too early**, re-fetch it:
 
