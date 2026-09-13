@@ -130,7 +130,6 @@ dmypy.json
 
 *.json
 *.json.gz
-data/raw/
 *.db
 *.duckdb
 *.wal
@@ -192,3 +191,15 @@ data/raw/
 # Bulk data: raw-zone archives and macOS cruft
 *.tar.gz
 .DS_Store
+
+# The whole archive directory, rather than the four patterns that between them
+# happened to cover most of it. `data/` holds the gzipped raw zone (one
+# directory per meet date), the DuckDB database `parse` builds from it, and the
+# fitted models under `data/model/` — a gigabyte or so, every byte of it either
+# re-fetchable from the two APIs or re-derivable by `parse` and a retrain.
+#
+# It replaces `data/raw/`, which was too narrow: `*.duckdb`, `*.json` and
+# `*.tar.gz` caught the database, the payloads and the tarball wherever they
+# sat, but nothing caught LightGBM's own text format, so `data/model/*.txt`
+# was the one thing here git offered to commit.
+data/
