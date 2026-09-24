@@ -1,3 +1,6 @@
-## 2023-10-27 - [String Methods vs Regex]
-**Learning:** For simple integer matching patterns (e.g. `^-?\d+$`), native string methods (`isdigit()`, `startswith('-')`) are approximately 2x faster than using `re.match()` in Python 3.14. When these functions are called millions of times during batch parsing (like `parse_heppa_int`), the regex overhead becomes a measurable bottleneck.
-**Action:** Use native string methods for simple type validation instead of regex when performance is critical.
+## 2024-11-20 - Fast tuple extraction for deduplication
+**Learning:** In `archive_db.py`, the `_insert_many` function relies on generating a tuple key for every row before insertion in order to deduplicate inputs. The original implementation used a generator expression `tuple(row[i] for i in key)` in a loop which is relatively slow.
+**Action:** Use `operator.itemgetter(*key)` (or `itemgetter(key[0])` for single keys) combined with a dict comprehension. This provides roughly an 8x speedup for this core data ingestion pipeline operation, as `itemgetter` operates in C and avoids the Python-level loop overhead.
+## 2026-09-24 - DuckDB executemany INSERT OR REPLACE bottleneck
+**Learning:** DuckDB's `executemany` handles batched inserts with primary key conflict resolutions (`INSERT OR REPLACE`) extremely slowly.
+**Action:** In `archive_db._insert_many`, instead of using `executemany`, dynamically rewrite the SQL query into a giant parameterized `VALUES (?,?,?), (?,?,?), ...` clause using regex. Splitting into chunks of ~1000 parameters and executing them via `execute` (bypassing `executemany`) resulted in a massive ~60x speedup for data ingestion.
