@@ -11,6 +11,7 @@ definition is not supported.
 """
 import os
 from contextlib import contextmanager
+from operator import itemgetter
 
 import duckdb
 
@@ -1118,9 +1119,13 @@ def _insert_many(cur, statement, rows, key):
     key wins, matching `INSERT OR REPLACE`. Keep each `*_KEY` in sync with its
     table's `PRIMARY KEY` when columns move.
     """
-    unique = {}
-    for row in rows:
-        unique[tuple(row[i] for i in key)] = row
+    if not rows:
+        return
+
+    # itemgetter is significantly faster than a tuple comprehension in a loop
+    get_key = itemgetter(*key) if len(key) > 1 else itemgetter(key[0])
+
+    unique = {get_key(row): row for row in rows}
     # DuckDB's executemany rejects an empty parameter list.
     if unique:
         cur.executemany(statement, list(unique.values()))
