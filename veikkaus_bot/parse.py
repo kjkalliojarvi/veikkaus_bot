@@ -129,8 +129,26 @@ def parse_meet_date(short_meet_date: str | None) -> str | None:
     """
     if not short_meet_date:
         return None
+
+    # ⚡ Bolt optimization: Fast path for DD.MM.YY to avoid slow datetime.strptime
+    text = short_meet_date.strip()
+    parts = text.split('.')
+    if len(parts) == 3 and len(parts[2]) == 2:
+        try:
+            d = int(parts[0])
+            m = int(parts[1])
+            y = int(parts[2])
+            # Fast basic bounds check, but rely on datetime(y, m, d) for real calendar validation
+            # (leap years, 30 vs 31 days). This avoids the slow strptime string parsing overhead
+            # while maintaining exact correctness.
+            if 1 <= m <= 12 and 1 <= d <= 31:
+                year = 2000 + y if y < 69 else 1900 + y
+                return datetime(year, m, d).date().isoformat()
+        except ValueError:
+            pass
+
     try:
-        return datetime.strptime(short_meet_date.strip(), '%d.%m.%y').date().isoformat()
+        return datetime.strptime(text, '%d.%m.%y').date().isoformat()
     except ValueError:
         return None
 
