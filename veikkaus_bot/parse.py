@@ -6,6 +6,7 @@ Re-running it over the same raw zone produces the same database, so a parsing
 bug is always fixable without re-crawling.
 """
 from datetime import datetime
+from functools import lru_cache
 import re
 
 from . import archive_db
@@ -26,6 +27,7 @@ KM_TIME_RE = re.compile(r'^([a-zäöå]*)(?:(\d+)[.:])?(\d{1,2}),(\d)\s*([a-zä�
                         re.IGNORECASE)
 
 
+@lru_cache(maxsize=2048)
 def normalize_name(name: str) -> str:
     """Fold a horse name to its comparison form.
 
@@ -50,6 +52,7 @@ def horse_key(name: str, birth_year: int | None) -> str:
 COUNTRY_TAG_RE = re.compile(r'\s*\(([a-z]{2,3})\)\s*$', re.IGNORECASE)
 
 
+@lru_cache(maxsize=2048)
 def strip_import_markers(name: str) -> str:
     """Drop the import markers Veikkaus writes inconsistently.
 
@@ -93,6 +96,7 @@ def base_horse_key(name: str, birth_year: int | None) -> str:
     return horse_key(strip_import_markers(name), birth_year)
 
 
+@lru_cache(maxsize=2048)
 def parse_km_time(text: str | None) -> tuple[int | None, bool]:
     """'24,9a' -> (84900, True). Returns (None, False) if it does not parse."""
     if not text:
@@ -156,6 +160,7 @@ def parse_tote_result(text: str | None) -> list[int]:
 # than leaning on a type.
 
 
+@lru_cache(maxsize=2048)
 def parse_heppa_int(text: str | None) -> int | None:
     """A Heppa numeric string to an int. '-' and '' mean absent.
 
@@ -197,6 +202,7 @@ def parse_placing(text: str | None) -> int | None:
     return value
 
 
+@lru_cache(maxsize=2048)
 def parse_heppa_km_time(text: str | None) -> int | None:
     """'1.18.8' -> 78800 ms, the long form of a km time.
 
@@ -214,6 +220,7 @@ def parse_heppa_km_time(text: str | None) -> int | None:
     return minutes * 60000 + seconds * 1000 + tenths * 100
 
 
+@lru_cache(maxsize=2048)
 def parse_heppa_odds(text: str | None) -> int | None:
     """'4.44' -> 444. Heppa sends a decimal where the rest of the archive
     stores hundredths, matching `probable` and `prev_start.winOdd`.
