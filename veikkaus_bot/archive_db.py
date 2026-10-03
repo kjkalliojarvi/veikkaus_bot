@@ -9,6 +9,7 @@ every id and epoch-millisecond value is `BIGINT` (`INTEGER` is 32-bit and
 `INSERT OR REPLACE` — the SQLite `ON CONFLICT` clause inside a `PRIMARY KEY`
 definition is not supported.
 """
+import itertools
 import os
 from contextlib import contextmanager
 from operator import itemgetter
@@ -1126,24 +1127,20 @@ def _insert_many(cur, statement, rows, key):
     get_key = itemgetter(*key) if len(key) > 1 else itemgetter(key[0])
 
     unique = {get_key(row): row for row in rows}
-    import re
     # DuckDB's executemany rejects an empty parameter list.
     if unique:
         # DuckDB's executemany handles batching and constraints very slowly for INSERT OR REPLACE.
         # Constructing a giant parameterized VALUES clause provides roughly a 60x speedup.
-        # Use regex to safely split the statement into base and values parts (case insensitive).
-        match = re.search(r'(.*?)\s+VALUES\s+(\(.*?\));?$', statement, flags=re.IGNORECASE | re.DOTALL)
-        if match:
-            base_stmt = match.group(1).strip()
-            values_part = match.group(2).strip()
+        base_stmt, sep, values_part = statement.partition(' VALUES ')
+        if sep:
+            base_stmt = base_stmt.strip()
+            values_part = values_part.strip().rstrip(';')
 
             unique_vals = list(unique.values())
             chunk_size = 1000
             for i in range(0, len(unique_vals), chunk_size):
                 chunk = unique_vals[i:i + chunk_size]
-                flat_list = []
-                for r in chunk:
-                    flat_list.extend(r)
+                flat_list = list(itertools.chain.from_iterable(chunk))
                 placeholders = ", ".join([values_part] * len(chunk))
                 cur.execute(f"{base_stmt} VALUES {placeholders};", flat_list)
         else:
