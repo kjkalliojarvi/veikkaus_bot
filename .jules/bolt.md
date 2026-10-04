@@ -4,3 +4,6 @@
 ## 2026-09-24 - DuckDB executemany INSERT OR REPLACE bottleneck
 **Learning:** DuckDB's `executemany` handles batched inserts with primary key conflict resolutions (`INSERT OR REPLACE`) extremely slowly.
 **Action:** In `archive_db._insert_many`, instead of using `executemany`, dynamically rewrite the SQL query into a giant parameterized `VALUES (?,?,?), (?,?,?), ...` clause using regex. Splitting into chunks of ~1000 parameters and executing them via `execute` (bypassing `executemany`) resulted in a massive ~60x speedup for data ingestion.
+## 2024-11-20 - Global regex compilation
+**Learning:** In `archive_db.py`, the `_insert_many` function uses a regex to parse the `VALUES` clause of SQL queries for optimizing batch inserts. The original implementation called `import re` and evaluated the regex string on every execution.
+**Action:** Moving `import re` to the module level and pre-compiling the regex using `re.compile()` provides a slight speed improvement and cleans up function-level imports. We avoid sacrificing code readability with `.join()` string operations while retaining the performance gain from precompilation.

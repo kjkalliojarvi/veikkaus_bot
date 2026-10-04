@@ -11,9 +11,13 @@ definition is not supported.
 """
 import os
 from contextlib import contextmanager
+import re
 from operator import itemgetter
 
 import duckdb
+
+# Pre-compile the regex used for splitting INSERT OR REPLACE statements
+INSERT_VALUES_RE = re.compile(r'(.*?)\s+VALUES\s+(\(.*?\));?$', flags=re.IGNORECASE | re.DOTALL)
 
 
 # Alongside the raw zone (`data/raw`), so that both halves of the pipeline
@@ -1126,13 +1130,12 @@ def _insert_many(cur, statement, rows, key):
     get_key = itemgetter(*key) if len(key) > 1 else itemgetter(key[0])
 
     unique = {get_key(row): row for row in rows}
-    import re
     # DuckDB's executemany rejects an empty parameter list.
     if unique:
         # DuckDB's executemany handles batching and constraints very slowly for INSERT OR REPLACE.
         # Constructing a giant parameterized VALUES clause provides roughly a 60x speedup.
         # Use regex to safely split the statement into base and values parts (case insensitive).
-        match = re.search(r'(.*?)\s+VALUES\s+(\(.*?\));?$', statement, flags=re.IGNORECASE | re.DOTALL)
+        match = INSERT_VALUES_RE.search(statement)
         if match:
             base_stmt = match.group(1).strip()
             values_part = match.group(2).strip()
@@ -1144,6 +1147,7 @@ def _insert_many(cur, statement, rows, key):
                 flat_list = []
                 for r in chunk:
                     flat_list.extend(r)
+
                 placeholders = ", ".join([values_part] * len(chunk))
                 cur.execute(f"{base_stmt} VALUES {placeholders};", flat_list)
         else:
