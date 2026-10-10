@@ -4,3 +4,6 @@
 ## 2026-09-24 - DuckDB executemany INSERT OR REPLACE bottleneck
 **Learning:** DuckDB's `executemany` handles batched inserts with primary key conflict resolutions (`INSERT OR REPLACE`) extremely slowly.
 **Action:** In `archive_db._insert_many`, instead of using `executemany`, dynamically rewrite the SQL query into a giant parameterized `VALUES (?,?,?), (?,?,?), ...` clause using regex. Splitting into chunks of ~1000 parameters and executing them via `execute` (bypassing `executemany`) resulted in a massive ~60x speedup for data ingestion.
+## 2026-10-10 - Fast scalar parsing with LRU cache
+**Learning:** During the parsing step, identical scalar values like horse names, string integer formats, and finish times (e.g., `18,8a`) are parsed repeatedly per line. Pydantic validation handles these poorly due to lack of caching.
+**Action:** Adding `@functools.lru_cache(maxsize=4096)` to hot-path pure parsing functions (e.g., `parse_heppa_int`, `parse_km_time`, `normalize_name`) eliminates redundant processing (regex parsing and string splitting) for previously seen values, reducing time spent in scalar parsing loops by over 10x. Apply LRU cache to any deterministic scalar formatting/parsing function in the data digestion pipeline.

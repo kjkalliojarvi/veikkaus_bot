@@ -6,6 +6,7 @@ Re-running it over the same raw zone produces the same database, so a parsing
 bug is always fixable without re-crawling.
 """
 from datetime import datetime
+import functools
 import re
 
 from . import archive_db
@@ -26,6 +27,8 @@ KM_TIME_RE = re.compile(r'^([a-zäöå]*)(?:(\d+)[.:])?(\d{1,2}),(\d)\s*([a-zä�
                         re.IGNORECASE)
 
 
+# ⚡ Bolt optimization: Caching name normalization speeds up processing as identical names repeat in historical data.
+@functools.lru_cache(maxsize=4096)
 def normalize_name(name: str) -> str:
     """Fold a horse name to its comparison form.
 
@@ -50,6 +53,8 @@ def horse_key(name: str, birth_year: int | None) -> str:
 COUNTRY_TAG_RE = re.compile(r'\s*\(([a-z]{2,3})\)\s*$', re.IGNORECASE)
 
 
+# ⚡ Bolt optimization: Caching regex strip speeds up processing since names repeat across rows.
+@functools.lru_cache(maxsize=4096)
 def strip_import_markers(name: str) -> str:
     """Drop the import markers Veikkaus writes inconsistently.
 
@@ -93,6 +98,8 @@ def base_horse_key(name: str, birth_year: int | None) -> str:
     return horse_key(strip_import_markers(name), birth_year)
 
 
+# ⚡ Bolt optimization: Caching km_time parsing speeds up processing since times repeat across rows.
+@functools.lru_cache(maxsize=4096)
 def parse_km_time(text: str | None) -> tuple[int | None, bool]:
     """'24,9a' -> (84900, True). Returns (None, False) if it does not parse."""
     if not text:
@@ -156,6 +163,8 @@ def parse_tote_result(text: str | None) -> list[int]:
 # than leaning on a type.
 
 
+# ⚡ Bolt optimization: Caching int parsing speeds up processing since integer fields repeat across rows.
+@functools.lru_cache(maxsize=4096)
 def parse_heppa_int(text: str | None) -> int | None:
     """A Heppa numeric string to an int. '-' and '' mean absent.
 
