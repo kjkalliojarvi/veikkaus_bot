@@ -6,6 +6,7 @@ Re-running it over the same raw zone produces the same database, so a parsing
 bug is always fixable without re-crawling.
 """
 from datetime import datetime
+import functools
 import re
 
 from . import archive_db
@@ -26,6 +27,10 @@ KM_TIME_RE = re.compile(r'^([a-zäöå]*)(?:(\d+)[.:])?(\d{1,2}),(\d)\s*([a-zä�
                         re.IGNORECASE)
 
 
+# ⚡ Bolt optimization: Memoize horse name processing. These functions are called
+# heavily for every start/prev-start across the whole archive and horse names
+# repeat heavily. LRU cache avoids redundant string processing.
+@functools.lru_cache(maxsize=8192)
 def normalize_name(name: str) -> str:
     """Fold a horse name to its comparison form.
 
@@ -50,6 +55,7 @@ def horse_key(name: str, birth_year: int | None) -> str:
 COUNTRY_TAG_RE = re.compile(r'\s*\(([a-z]{2,3})\)\s*$', re.IGNORECASE)
 
 
+@functools.lru_cache(maxsize=8192)
 def strip_import_markers(name: str) -> str:
     """Drop the import markers Veikkaus writes inconsistently.
 
