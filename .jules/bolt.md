@@ -4,3 +4,6 @@
 ## 2026-09-24 - DuckDB executemany INSERT OR REPLACE bottleneck
 **Learning:** DuckDB's `executemany` handles batched inserts with primary key conflict resolutions (`INSERT OR REPLACE`) extremely slowly.
 **Action:** In `archive_db._insert_many`, instead of using `executemany`, dynamically rewrite the SQL query into a giant parameterized `VALUES (?,?,?), (?,?,?), ...` clause using regex. Splitting into chunks of ~1000 parameters and executing them via `execute` (bypassing `executemany`) resulted in a massive ~60x speedup for data ingestion.
+## 2023-10-27 - [Optimization of _insert_many]
+**Learning:** In DuckDB batch ingestion logic, using `import re` inside a heavily-looped function and repeatedly calling `re.search` with inline compilation flags introduces measurable overhead due to import machinery and regex cache lookups. String partition `statement.partition(' VALUES ')` was attempted but proved brittle because SQL templates in this codebase might have varying cases or whitespace (e.g. `\nVALUES ` or `values`), making naive string slicing a functional regression risk.
+**Action:** When parsing strings inside tight loops, always pre-compile complex regex patterns at the module level rather than inline to save execution time, and prefer robust case/whitespace-agnostic regexes over brittle string slicing when parsing SQL keywords.

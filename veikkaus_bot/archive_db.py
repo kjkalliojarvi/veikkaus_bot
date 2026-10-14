@@ -10,6 +10,7 @@ every id and epoch-millisecond value is `BIGINT` (`INTEGER` is 32-bit and
 definition is not supported.
 """
 import os
+import re
 from contextlib import contextmanager
 from operator import itemgetter
 
@@ -1109,6 +1110,10 @@ def db_read(db_name):
         conn.close()
 
 
+# ⚡ Bolt optimization: Pre-compile robust regex for SQL statement values extraction
+_VALUES_RE = re.compile(r'(.*?)\s+VALUES\s+(\(.*?\));?$', flags=re.IGNORECASE | re.DOTALL)
+
+
 def _insert_many(cur, statement, rows, key):
     """Insert rows, at most one per primary key.
 
@@ -1126,13 +1131,11 @@ def _insert_many(cur, statement, rows, key):
     get_key = itemgetter(*key) if len(key) > 1 else itemgetter(key[0])
 
     unique = {get_key(row): row for row in rows}
-    import re
     # DuckDB's executemany rejects an empty parameter list.
     if unique:
         # DuckDB's executemany handles batching and constraints very slowly for INSERT OR REPLACE.
         # Constructing a giant parameterized VALUES clause provides roughly a 60x speedup.
-        # Use regex to safely split the statement into base and values parts (case insensitive).
-        match = re.search(r'(.*?)\s+VALUES\s+(\(.*?\));?$', statement, flags=re.IGNORECASE | re.DOTALL)
+        match = _VALUES_RE.search(statement)
         if match:
             base_stmt = match.group(1).strip()
             values_part = match.group(2).strip()
