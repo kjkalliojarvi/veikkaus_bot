@@ -12,6 +12,9 @@ BASEURL = 'https://www.veikkaus.fi/api/toto-info/v1/xml/'
 metadata = namedtuple('metadata', ['vaihto', 'jako', 'lyhenne', 'pvm', 'peli'])
 V_PVM = datetime.datetime.now().strftime("%d%m%Y")
 
+# Use a session to reuse TCP/TLS connection for consecutive API calls
+session = requests.Session()
+
 
 def tanaan(args):
     pvm = datetime.datetime.now().strftime('%d.%m.%Y')
@@ -22,7 +25,7 @@ def tanaan(args):
 
 
 def listat():
-    cards = requests.get(BASEURL + 'cards.xml')
+    cards = session.get(BASEURL + 'cards.xml')
     soup = BeautifulSoup(cards.content, 'xml')
     return soup.find_all('card')
 
@@ -32,7 +35,7 @@ def get_odds_xml(koodi, lahto, peli, compressed=False):
     pelifile = f'{koodi}_{V_PVM}_R{lahto}_{peli}.xml'
     url = f'{BASEURL}{pelifile}'
     if compressed:  # T-pelit
-        response = requests.get(url + '.zip')
+        response = session.get(url + '.zip')
         if response.content:
             with ZipFile(BytesIO(response.content)) as zipped_file:
                 with zipped_file.open(pelifile) as unzipped_file:
@@ -41,7 +44,7 @@ def get_odds_xml(koodi, lahto, peli, compressed=False):
             print(f'Ei kyseistä peliä: {pelifile}')
             sys.exit(1)
     else:  # muut
-        response = requests.get(url)
+        response = session.get(url)
         if response.content:
             kerroinxml = response.content
         else:
@@ -62,7 +65,7 @@ def get_odds_xml(koodi, lahto, peli, compressed=False):
 def Tprosentit(koodi, lahto, peli):
     koodi, lahto, peli = validate_params(koodi, lahto, peli)
     url = f'{BASEURL}{koodi}_{V_PVM}_R{lahto}_{peli}_percs.xml'
-    response = requests.get(url)
+    response = session.get(url)
     soup = BeautifulSoup(response.content, 'xml')
     kerroindata = soup.find('pool')
     data = metadata(

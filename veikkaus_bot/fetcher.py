@@ -53,6 +53,8 @@ class Fetcher:
         self.base_url = base_url
         self.consecutive_failures = 0
         self._last_request = 0.0
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
 
     def _wait(self):
         target = self.delay * random.uniform(1 - JITTER, 1 + JITTER)
@@ -69,7 +71,9 @@ class Fetcher:
                 time.sleep(pause)
             self._wait()
             try:
-                resp = requests.get(f'{self.base_url}{path}', headers=HEADERS, timeout=30)
+                # Use self.session to reuse the underlying TCP/TLS connection.
+                # Headers are already set on the session object.
+                resp = self.session.get(f'{self.base_url}{path}', timeout=30)
             except requests.RequestException as e:
                 result = FetchResult(None, None, str(e))
                 continue

@@ -13,31 +13,34 @@ CARD_POOLS_URL = f"{URL}/card/{{card_id}}/pools"
 RACE_RUNNERS_URL = f"{URL}/race/{{race_id}}/runners"
 POOL_ODDS_URL = f"{URL}/pool/{{pool_id}}/odds"
 
+# Use a session to reuse TCP/TLS connection for consecutive API calls
+session = requests.Session()
+session.headers.update(headers)
 
 def fetch_cards_today() -> list[dict]:
     """Fetch today's toto race cards from the Veikkaus REST API."""
-    response = requests.get(CARDS_TODAY_URL, headers=headers, timeout=10)
+    response = session.get(CARDS_TODAY_URL, timeout=10)
     response.raise_for_status()
     return response.json()["collection"]
 
 
 def fetch_card_races(card_id: int) -> list[dict]:
     """Fetch all races for a card from the Veikkaus REST API."""
-    response = requests.get(CARD_RACES_URL.format(card_id=card_id), headers=headers, timeout=10)
+    response = session.get(CARD_RACES_URL.format(card_id=card_id), timeout=10)
     response.raise_for_status()
     return response.json()["collection"]
 
 
 def fetch_card_pools(card_id: int) -> list[dict]:
     """Fetch all pools for a card from the Veikkaus REST API."""
-    response = requests.get(CARD_POOLS_URL.format(card_id=card_id), headers=headers, timeout=10)
+    response = session.get(CARD_POOLS_URL.format(card_id=card_id), timeout=10)
     response.raise_for_status()
     return response.json()["collection"]
 
 
 def fetch_race_odds(pool_id: int) -> dict:
     """Fetch odds for a pool from the Veikkaus REST API."""
-    response = requests.get(POOL_ODDS_URL.format(pool_id=pool_id), headers=headers, timeout=10)
+    response = session.get(POOL_ODDS_URL.format(pool_id=pool_id), timeout=10)
     response.raise_for_status()
     return response.json()
 
