@@ -15,6 +15,7 @@ from .heppa import backfill_foreign as heppa_foreign
 from .heppa import backfill_horse_stats as heppa_stats
 from .heppa import backfill_horses as heppa_horses
 from .horse_tui import stats_tui
+from .longshots import longshots
 from .parse import parse
 
 DEFAULT_RAW = 'data/raw'
@@ -255,6 +256,30 @@ def veikkaus():
     # No --create-db: this only ever reads, on a read-only connection, so there
     # is nothing it could do with a database it just made.
     parser_stats.set_defaults(func=stats_tui)
+
+    parser_longshots = subparser.add_parser(
+        'longshots',
+        help='Rank the longshots (<= 4 %% of a leg) of one T-pool on a day\'s cards '
+             'by a model fitted on the archive, or backtest that model')
+    parser_longshots.add_argument('--pool', default=None,
+                                  help='T-pool to score (T4, T5, T64, T65, T75); '
+                                       'asked for if not given')
+    parser_longshots.add_argument('--date', default=None,
+                                  help='Meet date to score (yyyy-mm-dd, default: today)')
+    parser_longshots.add_argument('--backtest', action='store_true',
+                                  help='Fit --pool on the seasons up to --train-to and report the later ones')
+    parser_longshots.add_argument('--train-to', type=int, default=2024,
+                                  help='Last training season for --backtest (default: 2024)')
+    parser_longshots.add_argument('--raw', default=DEFAULT_RAW,
+                                  help=f'Raw archive directory (default: {DEFAULT_RAW}); '
+                                       'nothing is written there')
+    parser_longshots.add_argument('--db', default=DEFAULT_DB,
+                                  help=f'DuckDB database file (default: {DEFAULT_DB})')
+    parser_longshots.add_argument('--delay', type=float, default=DEFAULT_DELAY,
+                                  help=f'Base seconds between requests (default: {DEFAULT_DELAY})')
+    # No --create-db: the model is fitted on the archive, read-only, and the
+    # live card is fetched straight into memory, never through the manifest.
+    parser_longshots.set_defaults(func=longshots)
 
     #parser_card = subparser.add_parser('card', help='Ravit')
     #parser_card.add_argument('-n', '--name', help='Radan nimi')
