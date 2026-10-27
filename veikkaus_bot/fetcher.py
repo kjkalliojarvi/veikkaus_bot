@@ -7,7 +7,7 @@ identifying User-Agent, exponential backoff, and a circuit breaker.
 """
 from collections import namedtuple
 import gzip
-import json
+import orjson
 import os
 import random
 import time
@@ -100,5 +100,5 @@ def read_raw(raw_root: str, raw_path: str):
     full = os.path.join(raw_root, raw_path)
     if not os.path.exists(full):
         return None
-    with gzip.open(full, 'rt', encoding='utf-8') as f:
-        return json.load(f)
+    with gzip.open(full, 'rb') as f:
+        return orjson.loads(f.read())

@@ -42,7 +42,7 @@ Run the backtest directly:
     uv run python -m veikkaus_bot.longshots T5
 """
 from datetime import date, datetime
-import json
+import orjson
 import math
 import sys
 
@@ -243,7 +243,7 @@ def _collection(fetcher: Fetcher, path: str) -> list:
     result = fetcher.fetch(path)
     if result.body is None:
         return []
-    payload = json.loads(result.body)
+    payload = orjson.loads(result.body)
     return payload.get('collection', []) if isinstance(payload, dict) else []
 
 
@@ -299,7 +299,7 @@ def live_legs(fetcher: Fetcher, cards: list[dict], pool_type: str, day: date) ->
         if not pool_id:
             continue
         result = fetcher.fetch(f'/pool/{pool_id}/odds')
-        legs = json.loads(result.body).get('odds', []) if result.body else []
+        legs = orjson.loads(result.body).get('odds', []) if result.body else []
         by_race = {}
         for o in legs:
             if not o.get('scratched'):
