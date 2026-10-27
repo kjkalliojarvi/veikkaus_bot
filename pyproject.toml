@@ -26,6 +26,7 @@ dependencies = [
     "duckdb>=1.5.5",
     "textual>=8.2.8",
     "numpy>=2.5.4",
+    "orjson>=3.13.0",
 ]
 
 [project.urls]

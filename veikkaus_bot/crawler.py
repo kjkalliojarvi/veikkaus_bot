@@ -10,7 +10,7 @@ valuable seasons are already banked.
 """
 from collections import namedtuple
 from datetime import date, datetime, timedelta
-import json
+import orjson
 
 from .archive_db import CREATE_SCHEMA, db_ops
 from .fetcher import CircuitOpen, Fetcher, read_raw
@@ -284,7 +284,7 @@ def crawl(manifest: Manifest, fetcher: Fetcher, expander, types: tuple = VEIKKAU
                 continue
             fetcher.store_raw(task.rawPath, result.body)
             try:
-                manifest.enqueue(expander(task, json.loads(result.body)))
+                manifest.enqueue(expander(task, orjson.loads(result.body)))
             except (ValueError, KeyError) as e:
                 manifest.mark(task, 'failed', result.httpCode, f'expand: {e}')
                 continue
