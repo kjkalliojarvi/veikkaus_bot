@@ -4,3 +4,6 @@
 ## 2026-09-24 - DuckDB executemany INSERT OR REPLACE bottleneck
 **Learning:** DuckDB's `executemany` handles batched inserts with primary key conflict resolutions (`INSERT OR REPLACE`) extremely slowly.
 **Action:** In `archive_db._insert_many`, instead of using `executemany`, dynamically rewrite the SQL query into a giant parameterized `VALUES (?,?,?), (?,?,?), ...` clause using regex. Splitting into chunks of ~1000 parameters and executing them via `execute` (bypassing `executemany`) resulted in a massive ~60x speedup for data ingestion.
+## 2024-11-20 - Fast JSON deserialization for large payload collections
+**Learning:** The project relies heavily on crawling and processing very large JSON payloads (e.g., multi-leg pools with thousands of runners) using the standard `json` library, which resulted in a parsing performance bottleneck during operations like backfilling and parsing multi-leg percentages.
+**Action:** Replace `import json` with `import orjson` everywhere large API responses and gzipped archives are loaded (`crawler.py`, `fetcher.py`, `longshots.py`). Reading gzipped files directly in binary mode (`'rb'`) for `orjson.loads(f.read())` yields roughly a 2x-4x speedup over standard `json.load()` when ingesting bulk datasets.
