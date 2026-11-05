@@ -7,3 +7,6 @@
 ## 2024-11-20 - Fast JSON deserialization for large payload collections
 **Learning:** The project relies heavily on crawling and processing very large JSON payloads (e.g., multi-leg pools with thousands of runners) using the standard `json` library, which resulted in a parsing performance bottleneck during operations like backfilling and parsing multi-leg percentages.
 **Action:** Replace `import json` with `import orjson` everywhere large API responses and gzipped archives are loaded (`crawler.py`, `fetcher.py`, `longshots.py`). Reading gzipped files directly in binary mode (`'rb'`) for `orjson.loads(f.read())` yields roughly a 2x-4x speedup over standard `json.load()` when ingesting bulk datasets.
+## 2024-11-20 - Regex overhead in hot loops
+**Learning:** Using `re.search` inside the SQL statement processing loop in `archive_db._insert_many` added significant execution overhead (roughly a ~10x penalty compared to string splits). It became a bottleneck as data scale increased, despite avoiding the DuckDB `executemany` bottleneck.
+**Action:** Replace `re.search` with direct string `.split(' VALUES ')` and optimize the parameter flattening loop using string multiplication (`+ (", " + part) * (N-1)`) and cached `.extend` calls for an additional performance gain in the hot path.
