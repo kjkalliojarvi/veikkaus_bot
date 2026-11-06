@@ -7,3 +7,7 @@
 ## 2024-11-20 - Fast JSON deserialization for large payload collections
 **Learning:** The project relies heavily on crawling and processing very large JSON payloads (e.g., multi-leg pools with thousands of runners) using the standard `json` library, which resulted in a parsing performance bottleneck during operations like backfilling and parsing multi-leg percentages.
 **Action:** Replace `import json` with `import orjson` everywhere large API responses and gzipped archives are loaded (`crawler.py`, `fetcher.py`, `longshots.py`). Reading gzipped files directly in binary mode (`'rb'`) for `orjson.loads(f.read())` yields roughly a 2x-4x speedup over standard `json.load()` when ingesting bulk datasets.
+
+## 2024-05-13 - datetime.strptime parsing overhead
+**Learning:** `datetime.strptime()` has significant constant parsing overhead for short strings like dates.
+**Action:** When parsing a huge volume of highly uniform date strings on the hot path (like `'dd.mm.yy'` in `parse_meet_date`), check for the exact expected string length and character positions. By manually slicing and falling back to `datetime.date(y, m, d)`, we can see up to a ~3x performance boost over directly invoking `datetime.strptime()`. Wait to fall back to `strptime` for inputs that don't match the fast path criteria.
