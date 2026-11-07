@@ -317,8 +317,8 @@ def refetch_window(args, manifest: Manifest, types: tuple):
 
 def backfill(args):
     """CLI handler: enqueue a date window and crawl it, newest date first."""
-    start = datetime.strptime(args.start, '%Y-%m-%d').date()
-    end = datetime.strptime(args.end, '%Y-%m-%d').date() if args.end else date.today()
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end) if args.end else date.today()
     if start > end:
         print('--from must not be after --to.')
         return

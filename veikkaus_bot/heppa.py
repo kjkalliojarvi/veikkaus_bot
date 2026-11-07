@@ -221,7 +221,7 @@ def read_seeds(path: str) -> tuple[list[tuple[str, str]], list[str]]:
             continue
         day, track = parts
         try:
-            datetime.strptime(day, '%Y-%m-%d')
+            date.fromisoformat(day)
         except ValueError:
             complaints.append(f'{path}:{number}: {day!r} is not a yyyy-mm-dd date')
             continue
@@ -293,8 +293,8 @@ def expand(task: Task, payload) -> list[Task]:
 
 def backfill(args):
     """CLI handler: enqueue a date window of Heppa meetings and crawl it."""
-    start = datetime.strptime(args.start, '%Y-%m-%d').date()
-    end = datetime.strptime(args.end, '%Y-%m-%d').date() if args.end else date.today()
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end) if args.end else date.today()
     if start > end:
         print('--from must not be after --to.')
         return
