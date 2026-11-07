@@ -247,11 +247,24 @@ def _collection(fetcher: Fetcher, path: str) -> list:
     return payload.get('collection', []) if isinstance(payload, dict) else []
 
 
+def _parse_short_date(d: str) -> date | None:
+    # ⚡ Bolt optimization: Manual string splitting is faster than strptime
+    try:
+        parts = d.strip().split('.')
+        if len(parts) == 3:
+            y = int(parts[2])
+            y += 2000 if y < 69 else 1900
+            return date(y, int(parts[1]), int(parts[0]))
+    except ValueError:
+        pass
+    return None
+
+
 def _last_start(prev_starts: list) -> date | None:
     """The most recent earlier start's date, from `shortMeetDate` (dd.mm.yy):
     `meetDate` there is a day early, being Finnish midnight in UTC."""
-    days = [datetime.strptime(s['shortMeetDate'], '%d.%m.%y').date()
-            for s in prev_starts if s.get('shortMeetDate')]
+    days = filter(None, (_parse_short_date(s['shortMeetDate'])
+                         for s in prev_starts if s.get('shortMeetDate')))
     return max(days, default=None)
 
 
@@ -368,7 +381,7 @@ def longshots(args):
         with db_read(args.db) as conn:
             backtest(conn, pool_type, args.train_to)
         return
-    day = datetime.strptime(args.date, '%Y-%m-%d').date() if args.date else date.today()
+    day = date.fromisoformat(args.date) if args.date else date.today()
     fetcher = Fetcher(args.raw, args.delay)
     cards = live_cards(fetcher, day)
     if not cards:
