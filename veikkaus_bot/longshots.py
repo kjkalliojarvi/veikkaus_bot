@@ -250,8 +250,16 @@ def _collection(fetcher: Fetcher, path: str) -> list:
 def _last_start(prev_starts: list) -> date | None:
     """The most recent earlier start's date, from `shortMeetDate` (dd.mm.yy):
     `meetDate` there is a day early, being Finnish midnight in UTC."""
-    days = [datetime.strptime(s['shortMeetDate'], '%d.%m.%y').date()
-            for s in prev_starts if s.get('shortMeetDate')]
+    days = []
+    for s in prev_starts:
+        smd = s.get('shortMeetDate')
+        if not smd:
+            continue
+        try:
+            # Optimized parsing for rigid dd.mm.yy format
+            days.append(date(2000 + int(smd[6:8]), int(smd[3:5]), int(smd[0:2])))
+        except (ValueError, IndexError):
+            days.append(datetime.strptime(smd, '%d.%m.%y').date())
     return max(days, default=None)
 
 

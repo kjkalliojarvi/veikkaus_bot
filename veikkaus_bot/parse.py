@@ -5,7 +5,7 @@ fetched and where they were stored; this walks those files and upserts them.
 Re-running it over the same raw zone produces the same database, so a parsing
 bug is always fixable without re-crawling.
 """
-from datetime import datetime
+from datetime import datetime, date
 import re
 
 from . import archive_db
@@ -129,10 +129,16 @@ def parse_meet_date(short_meet_date: str | None) -> str | None:
     """
     if not short_meet_date:
         return None
+
+    s = short_meet_date.strip()
     try:
-        return datetime.strptime(short_meet_date.strip(), '%d.%m.%y').date().isoformat()
-    except ValueError:
-        return None
+        # Optimized parsing for rigid dd.mm.yy format
+        return date(2000 + int(s[6:8]), int(s[3:5]), int(s[0:2])).isoformat()
+    except (ValueError, IndexError):
+        try:
+            return datetime.strptime(s, '%d.%m.%y').date().isoformat()
+        except ValueError:
+            return None
 
 
 def parse_win_odd(text: str | None) -> int | None:
