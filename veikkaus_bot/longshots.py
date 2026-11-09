@@ -43,6 +43,7 @@ Run the backtest directly:
 """
 from datetime import date, datetime
 import orjson
+from .parse import _fast_parse_date
 import math
 import sys
 
@@ -250,8 +251,15 @@ def _collection(fetcher: Fetcher, path: str) -> list:
 def _last_start(prev_starts: list) -> date | None:
     """The most recent earlier start's date, from `shortMeetDate` (dd.mm.yy):
     `meetDate` there is a day early, being Finnish midnight in UTC."""
-    days = [datetime.strptime(s['shortMeetDate'], '%d.%m.%y').date()
-            for s in prev_starts if s.get('shortMeetDate')]
+    days = []
+    for s in prev_starts:
+        short_meet_date = s.get('shortMeetDate')
+        if not short_meet_date:
+            continue
+        try:
+            days.append(_fast_parse_date(short_meet_date))
+        except ValueError:
+            pass
     return max(days, default=None)
 
 

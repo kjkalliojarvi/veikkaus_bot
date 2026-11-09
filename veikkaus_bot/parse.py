@@ -5,7 +5,7 @@ fetched and where they were stored; this walks those files and upserts them.
 Re-running it over the same raw zone produces the same database, so a parsing
 bug is always fixable without re-crawling.
 """
-from datetime import datetime
+from datetime import datetime, date
 import re
 
 from . import archive_db
@@ -120,6 +120,18 @@ def parse_result(text: str | None) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+def _fast_parse_date(text: str) -> date:
+    """Helper to parse uniform 'DD.MM.YY' or single-digit 'D.M.YY' date strings quickly."""
+    text = text.strip()
+    # Fast path for standard 'DD.MM.YY' length (22.12.24)
+    if len(text) == 8 and text[2] == '.' and text[5] == '.':
+        return date(2000 + int(text[6:8]), int(text[3:5]), int(text[0:2]))
+    # Fallback for single digits (1.2.25)
+    parts = text.split('.')
+    if len(parts) == 3:
+        return date(2000 + int(parts[2]), int(parts[1]), int(parts[0]))
+    raise ValueError(f"Invalid date format: {text}")
+
 def parse_meet_date(short_meet_date: str | None) -> str | None:
     """'22.12.24' -> '2024-12-22'.
 
@@ -130,7 +142,7 @@ def parse_meet_date(short_meet_date: str | None) -> str | None:
     if not short_meet_date:
         return None
     try:
-        return datetime.strptime(short_meet_date.strip(), '%d.%m.%y').date().isoformat()
+        return _fast_parse_date(short_meet_date).isoformat()
     except ValueError:
         return None
 
