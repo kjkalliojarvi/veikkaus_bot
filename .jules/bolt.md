@@ -7,3 +7,6 @@
 ## 2024-11-20 - Fast JSON deserialization for large payload collections
 **Learning:** The project relies heavily on crawling and processing very large JSON payloads (e.g., multi-leg pools with thousands of runners) using the standard `json` library, which resulted in a parsing performance bottleneck during operations like backfilling and parsing multi-leg percentages.
 **Action:** Replace `import json` with `import orjson` everywhere large API responses and gzipped archives are loaded (`crawler.py`, `fetcher.py`, `longshots.py`). Reading gzipped files directly in binary mode (`'rb'`) for `orjson.loads(f.read())` yields roughly a 2x-4x speedup over standard `json.load()` when ingesting bulk datasets.
+## 2024-11-20 - Fast date parsing in ingestion loops
+**Learning:** For performance-critical data parsing (like the ingestion step), manual string slicing combined with `datetime.date()` is preferred over `datetime.strptime()`. It avoids significant constant parsing overhead for uniform, rigidly-formatted date strings (like `DD.MM.YY`).
+**Action:** Use the `_fast_parse_date` utility in `veikkaus_bot/parse.py` for highly performant parsing of these uniform date strings instead of `datetime.strptime` to bypass Python's standard parsing overhead.
