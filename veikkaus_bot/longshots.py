@@ -51,6 +51,7 @@ import numpy as np
 from .archive_db import DEFAULT_DB, db_read
 from .crawler import LEG_POOL_TYPES
 from .fetcher import Fetcher
+from .parse import _fast_parse_date
 
 
 # The population: the share the question names.
@@ -250,7 +251,7 @@ def _collection(fetcher: Fetcher, path: str) -> list:
 def _last_start(prev_starts: list) -> date | None:
     """The most recent earlier start's date, from `shortMeetDate` (dd.mm.yy):
     `meetDate` there is a day early, being Finnish midnight in UTC."""
-    days = [datetime.strptime(s['shortMeetDate'], '%d.%m.%y').date()
+    days = [_fast_parse_date(s['shortMeetDate'])
             for s in prev_starts if s.get('shortMeetDate')]
     return max(days, default=None)
 

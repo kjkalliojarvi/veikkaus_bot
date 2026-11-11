@@ -5,7 +5,7 @@ fetched and where they were stored; this walks those files and upserts them.
 Re-running it over the same raw zone produces the same database, so a parsing
 bug is always fixable without re-crawling.
 """
-from datetime import datetime
+from datetime import date, datetime
 import re
 
 from . import archive_db
@@ -120,6 +120,18 @@ def parse_result(text: str | None) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+def _fast_parse_date(s: str) -> date:
+    """Fast parsing for 'DD.MM.YY' date strings from the Veikkaus API.
+    Bypasses datetime.strptime overhead."""
+    d, m, y = s.split('.')
+    year = int(y)
+    if year < 69:
+        year += 2000
+    else:
+        year += 1900
+    return date(year, int(m), int(d))
+
+
 def parse_meet_date(short_meet_date: str | None) -> str | None:
     """'22.12.24' -> '2024-12-22'.
 
@@ -130,7 +142,7 @@ def parse_meet_date(short_meet_date: str | None) -> str | None:
     if not short_meet_date:
         return None
     try:
-        return datetime.strptime(short_meet_date.strip(), '%d.%m.%y').date().isoformat()
+        return _fast_parse_date(short_meet_date.strip()).isoformat()
     except ValueError:
         return None
 
